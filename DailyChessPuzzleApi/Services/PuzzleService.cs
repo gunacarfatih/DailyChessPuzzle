@@ -11,10 +11,14 @@ namespace DailyChessPuzzleApi.Services
     public class PuzzleService : IPuzzleService
     {
         private readonly ApplicationDbContext _context;
+        private readonly ILogger<PuzzleService> _logger;
 
-        public PuzzleService(ApplicationDbContext context)
+        public PuzzleService(
+            ApplicationDbContext context,
+            ILogger<PuzzleService> logger)
         {
             _context = context;
+            _logger = logger;
         }
 
         // Günün bulmacasını getirir.
@@ -32,13 +36,26 @@ namespace DailyChessPuzzleApi.Services
                 );
 
             if (puzzle == null)
+            {
+                _logger.LogWarning(
+                    "No active puzzle found for today: {PuzzleDate}",
+                    today
+                );
+
                 return null;
+            }
 
             var isSolved = await _context.PuzzleAttempts
                 .AnyAsync(
                     a => a.PuzzleId == puzzle.Id && a.ClientId == clientId,
                     cancellationToken
                 );
+
+            _logger.LogInformation(
+                "Today's puzzle retrieved successfully. PuzzleId: {PuzzleId}, IsSolved: {IsSolved}",
+                puzzle.Id,
+                isSolved
+            );
 
             return new PuzzleTodayResponse
             {
@@ -66,7 +83,16 @@ namespace DailyChessPuzzleApi.Services
                 );
 
             if (puzzle == null)
-                throw new KeyNotFoundException("Today's puzzle was not found.");
+            {
+                _logger.LogWarning(
+                    "Puzzle submission failed. Puzzle not found. PuzzleId: {PuzzleId}",
+                    request.PuzzleId
+                );
+
+                throw new KeyNotFoundException(
+                    "Today's puzzle was not found."
+                );
+            }
 
             var alreadySolved = await _context.PuzzleAttempts
                 .AnyAsync(
@@ -76,9 +102,16 @@ namespace DailyChessPuzzleApi.Services
                 );
 
             if (alreadySolved)
+            {
+                _logger.LogWarning(
+                    "Duplicate puzzle submission detected. PuzzleId: {PuzzleId}",
+                    request.PuzzleId
+                );
+
                 throw new InvalidOperationException(
                     "You have already submitted this puzzle."
                 );
+            }
 
             long timePenalty = (long)request.Seconds * 2;
             long wrongMovePenalty = (long)request.WrongMoves * 150;
@@ -115,11 +148,22 @@ namespace DailyChessPuzzleApi.Services
                 ex.InnerException is PostgresException postgresException &&
                 postgresException.SqlState == PostgresErrorCodes.UniqueViolation)
             {
+                _logger.LogWarning(
+                    "Duplicate puzzle submission detected by database constraint. PuzzleId: {PuzzleId}",
+                    request.PuzzleId
+                );
+
                 throw new InvalidOperationException(
                     "You have already submitted this puzzle.",
                     ex
                 );
             }
+        
+            _logger.LogInformation(
+                "Puzzle submission saved successfully. PuzzleId: {PuzzleId}, Score: {Score}",
+                request.PuzzleId,
+                score
+            );
 
             return new PuzzleSubmitResponse
             {

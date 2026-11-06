@@ -9,10 +9,14 @@ namespace DailyChessPuzzleApi.Controllers
     public class LeaderboardController : ControllerBase
     {
         private readonly ILeaderboardService _leaderboardService;
+        private readonly ILogger<LeaderboardController> _logger;
 
-        public LeaderboardController(ILeaderboardService leaderboardService)
+        public LeaderboardController(
+            ILeaderboardService leaderboardService,
+            ILogger<LeaderboardController> logger)
         {
             _leaderboardService = leaderboardService;
+            _logger = logger;
         }
 
         [HttpGet]
@@ -22,21 +26,20 @@ namespace DailyChessPuzzleApi.Controllers
             [FromQuery] string? clientId = null,
             CancellationToken cancellationToken = default)
         {
-            try
-            {
-                var response = await _leaderboardService.GetLeaderboardAsync(
-                    period,
-                    country,
-                    clientId,
-                    cancellationToken
-                );
+            _logger.LogInformation(
+                "GET leaderboard request received. Period: {Period}, Country: {Country}",
+                period,
+                country ?? "Global"
+            );
 
-                return Ok(response);
-            }
-            catch (ArgumentException ex)
-            {
-                return BadRequest(ex.Message);
-            }
+            var response = await _leaderboardService.GetLeaderboardAsync(
+                period,
+                country,
+                clientId,
+                cancellationToken
+            );
+
+            return Ok(response);
         }
     }
 }
