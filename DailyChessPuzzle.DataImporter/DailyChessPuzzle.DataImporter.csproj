@@ -1,0 +1,23 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<OutputType>Exe</OutputType>
+		<TargetFramework>net10.0</TargetFramework>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
+		<UserSecretsId>ee3b2c3d-a90f-48f2-9862-fd1ba66d32d8</UserSecretsId>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<PackageReference Include="CsvHelper" Version="34.0.0" />
+		<PackageReference Include="Microsoft.EntityFrameworkCore" Version="10.0.14" />
+		<PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="10.0.14" />
+		<PackageReference Include="Microsoft.Extensions.Configuration.UserSecrets" Version="10.0.14" />
+		<PackageReference Include="ZstdSharp.Port" Version="0.8.8" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\DailyChessPuzzleApi\DailyChessPuzzleApi.csproj" />
+	</ItemGroup>
+
+</Project>

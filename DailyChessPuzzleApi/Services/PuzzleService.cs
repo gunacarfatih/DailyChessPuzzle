@@ -28,12 +28,13 @@ namespace DailyChessPuzzleApi.Services
         {
             var today = DateOnly.FromDateTime(DateTime.UtcNow);
 
-            var puzzle = await _context.Puzzles
+            var puzzle = await _context.DailyPuzzles
                 .AsNoTracking()
-                .FirstOrDefaultAsync(
-                    p => p.PuzzleDate == today && p.IsActive,
-                    cancellationToken
-                );
+                .Where(dp =>
+                    dp.PuzzleDate == today &&
+                    dp.Puzzle.IsActive)
+                .Select(dp => dp.Puzzle)
+                .FirstOrDefaultAsync(cancellationToken);
 
             if (puzzle == null)
             {
@@ -47,7 +48,8 @@ namespace DailyChessPuzzleApi.Services
 
             var isSolved = await _context.PuzzleAttempts
                 .AnyAsync(
-                    a => a.PuzzleId == puzzle.Id && a.ClientId == clientId,
+                    a => a.PuzzleId == puzzle.Id &&
+                         a.ClientId == clientId,
                     cancellationToken
                 );
 
@@ -62,7 +64,7 @@ namespace DailyChessPuzzleApi.Services
                 Id = puzzle.Id,
                 Fen = puzzle.Fen,
                 Moves = puzzle.Moves,
-                Difficulty = puzzle.Difficulty,
+                Difficulty = GetDifficulty(puzzle.Rating),
                 IsSolved = isSolved
             };
         }
@@ -74,13 +76,13 @@ namespace DailyChessPuzzleApi.Services
         {
             var today = DateOnly.FromDateTime(DateTime.UtcNow);
 
-            var puzzle = await _context.Puzzles
-                .FirstOrDefaultAsync(
-                    p => p.Id == request.PuzzleId &&
-                         p.PuzzleDate == today &&
-                         p.IsActive,
-                    cancellationToken
-                );
+            var puzzle = await _context.DailyPuzzles
+                .Where(dp =>
+                    dp.PuzzleId == request.PuzzleId &&
+                    dp.PuzzleDate == today &&
+                    dp.Puzzle.IsActive)
+                .Select(dp => dp.Puzzle)
+                .FirstOrDefaultAsync(cancellationToken);
 
             if (puzzle == null)
             {
@@ -158,7 +160,7 @@ namespace DailyChessPuzzleApi.Services
                     ex
                 );
             }
-        
+
             _logger.LogInformation(
                 "Puzzle submission saved successfully. PuzzleId: {PuzzleId}, Score: {Score}",
                 request.PuzzleId,
@@ -173,6 +175,18 @@ namespace DailyChessPuzzleApi.Services
                 UsedHint = request.UsedHint,
                 Message = "Puzzle result saved successfully."
             };
+        }
+
+        // Rating değerinden zorluk seviyesini belirler.
+        private static string GetDifficulty(int rating)
+        {
+            if (rating <= 1400)
+                return "Kolay";
+
+            if (rating <= 2000)
+                return "Orta";
+
+            return "Zor";
         }
     }
 }

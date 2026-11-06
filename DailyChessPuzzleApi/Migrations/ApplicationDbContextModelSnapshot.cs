@@ -22,6 +22,30 @@ namespace DailyChessPuzzleApi.Migrations
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
 
+            modelBuilder.Entity("DailyChessPuzzleApi.Models.DailyPuzzle", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<DateOnly>("PuzzleDate")
+                        .HasColumnType("date");
+
+                    b.Property<int>("PuzzleId")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("PuzzleDate")
+                        .IsUnique();
+
+                    b.HasIndex("PuzzleId");
+
+                    b.ToTable("DailyPuzzles");
+                });
+
             modelBuilder.Entity("DailyChessPuzzleApi.Models.Puzzle", b =>
                 {
                     b.Property<int>("Id")
@@ -30,10 +54,6 @@ namespace DailyChessPuzzleApi.Migrations
 
                     NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
 
-                    b.Property<string>("Difficulty")
-                        .IsRequired()
-                        .HasColumnType("text");
-
                     b.Property<string>("Fen")
                         .IsRequired()
                         .HasColumnType("text");
@@ -41,16 +61,27 @@ namespace DailyChessPuzzleApi.Migrations
                     b.Property<bool>("IsActive")
                         .HasColumnType("boolean");
 
+                    b.Property<string>("LichessPuzzleId")
+                        .IsRequired()
+                        .HasColumnType("text");
+
                     b.Property<string>("Moves")
                         .IsRequired()
                         .HasColumnType("text");
 
-                    b.Property<DateOnly>("PuzzleDate")
-                        .HasColumnType("date");
+                    b.Property<int>("Popularity")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Rating")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Themes")
+                        .IsRequired()
+                        .HasColumnType("text");
 
                     b.HasKey("Id");
 
-                    b.HasIndex("PuzzleDate")
+                    b.HasIndex("LichessPuzzleId")
                         .IsUnique();
 
                     b.ToTable("Puzzles");
@@ -102,6 +133,17 @@ namespace DailyChessPuzzleApi.Migrations
                     b.ToTable("PuzzleAttempts");
                 });
 
+            modelBuilder.Entity("DailyChessPuzzleApi.Models.DailyPuzzle", b =>
+                {
+                    b.HasOne("DailyChessPuzzleApi.Models.Puzzle", "Puzzle")
+                        .WithMany("DailyPuzzles")
+                        .HasForeignKey("PuzzleId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Puzzle");
+                });
+
             modelBuilder.Entity("DailyChessPuzzleApi.Models.PuzzleAttempt", b =>
                 {
                     b.HasOne("DailyChessPuzzleApi.Models.Puzzle", "Puzzle")
@@ -111,6 +153,11 @@ namespace DailyChessPuzzleApi.Migrations
                         .IsRequired();
 
                     b.Navigation("Puzzle");
+                });
+
+            modelBuilder.Entity("DailyChessPuzzleApi.Models.Puzzle", b =>
+                {
+                    b.Navigation("DailyPuzzles");
                 });
 #pragma warning restore 612, 618
         }

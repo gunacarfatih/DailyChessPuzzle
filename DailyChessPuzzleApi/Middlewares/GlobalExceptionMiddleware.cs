@@ -1,6 +1,7 @@
-﻿using System.Runtime.ExceptionServices;
+﻿
+using System.Runtime.ExceptionServices;
 using System.Net;
-using System.Text.Json;
+using DailyChessPuzzleApi.Responses;
 
 namespace DailyChessPuzzleApi.Middlewares
 {
@@ -17,6 +18,7 @@ namespace DailyChessPuzzleApi.Middlewares
             _logger = logger;
         }
 
+        // HTTP isteği boyunca oluşabilecek hataları yakalar.
         public async Task InvokeAsync(HttpContext context)
         {
             try
@@ -26,6 +28,7 @@ namespace DailyChessPuzzleApi.Middlewares
             catch (OperationCanceledException) when (
                 context.RequestAborted.IsCancellationRequested)
             {
+                // İstemci isteği iptal ettiğinde hata cevabı üretmeyiz.
                 _logger.LogInformation(
                     "HTTP request was cancelled by the client."
                 );
@@ -58,6 +61,7 @@ namespace DailyChessPuzzleApi.Middlewares
             }
             catch (Exception ex)
             {
+                // Yukarıdaki kategorilere girmeyen hatalar 500 döndürür.
                 await HandleExceptionAsync(
                     context,
                     ex,
@@ -66,16 +70,20 @@ namespace DailyChessPuzzleApi.Middlewares
             }
         }
 
+        // Yakalanan exception için standart API hata cevabı oluşturur.
         private async Task HandleExceptionAsync(
             HttpContext context,
             Exception exception,
             HttpStatusCode statusCode)
         {
+            // HTTP cevabı gönderilmeye başlandıysa yeni cevap yazılamaz.
             if (context.Response.HasStarted)
             {
                 ExceptionDispatchInfo.Capture(exception).Throw();
                 return;
             }
+
+            // Hata ayrıntıları sunucu loglarına kaydedilir.
             _logger.LogError(
                 exception,
                 "Request failed. Method: {Method}, Path: {Path}, StatusCode: {StatusCode}",
@@ -84,21 +92,45 @@ namespace DailyChessPuzzleApi.Middlewares
                 (int)statusCode
             );
 
+            var isInternalServerError =
+                statusCode == HttpStatusCode.InternalServerError;
+
+            // Beklenmeyen sunucu hatalarında iç detayları istemciye göstermeyiz.
+            var message = isInternalServerError
+                ? "An unexpected error occurred."
+                : exception.Message;
+
+            // HTTP durum koduna göre hata kodu belirlenir.
+            var errorCode = statusCode switch
+            {
+                HttpStatusCode.BadRequest => "BAD_REQUEST",
+                HttpStatusCode.NotFound => "RESOURCE_NOT_FOUND",
+                HttpStatusCode.Conflict => "CONFLICT",
+                HttpStatusCode.InternalServerError => "INTERNAL_SERVER_ERROR",
+                _ => "UNKNOWN_ERROR"
+            };
+
+            // Hata detayları yalnızca beklenen hata türlerinde döndürülür.
+            var errors = isInternalServerError
+                ? null
+                : new List<string> { exception.Message };
+
+            // Standart hata cevabı ResponseFactory üzerinden oluşturulur.
+            var response = ResponseFactory.Failure<object>(
+                context,
+                message,
+                (int)statusCode,
+                errorCode,
+                errors
+            );
+
+            // HTTP cevabı hazırlanır.
             context.Response.Clear();
             context.Response.StatusCode = (int)statusCode;
             context.Response.ContentType = "application/json";
 
-            var response = new
-            {
-                StatusCode = (int)statusCode,
-                Message = statusCode == HttpStatusCode.InternalServerError
-                    ? "An unexpected error occurred."
-                    : exception.Message
-            };
-
-            await context.Response.WriteAsync(
-                JsonSerializer.Serialize(response)
-            );
+            // JSON formatında istemciye gönderilir.
+            await context.Response.WriteAsJsonAsync(response);
         }
     }
 }

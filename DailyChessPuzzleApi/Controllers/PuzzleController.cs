@@ -1,6 +1,7 @@
 ﻿
 using DailyChessPuzzleApi.DTOs;
 using DailyChessPuzzleApi.Services.Interfaces;
+using DailyChessPuzzleApi.Responses;
 using Microsoft.AspNetCore.Mvc;
 
 namespace DailyChessPuzzleApi.Controllers
@@ -36,7 +37,12 @@ namespace DailyChessPuzzleApi.Controllers
                     "GET today's puzzle request rejected. ClientId is missing."
                 );
 
-                return BadRequest("ClientId is required.");
+                return BadRequest(ResponseFactory.Failure<object>(
+                    HttpContext,
+                    "ClientId is required.",
+                    400,
+                    "CLIENT_ID_REQUIRED"
+                ));
             }
 
             var puzzle = await _puzzleService.GetTodayAsync(
@@ -45,9 +51,20 @@ namespace DailyChessPuzzleApi.Controllers
             );
 
             if (puzzle == null)
-                return NotFound("Today's puzzle was not found.");
+            {
+                return NotFound(ResponseFactory.Failure<object>(
+                    HttpContext,
+                    "Today's puzzle was not found.",
+                    404,
+                    "PUZZLE_NOT_FOUND"
+                ));
+            }
 
-            return Ok(puzzle);
+            return Ok(ResponseFactory.Success(
+                HttpContext,
+                "Today's puzzle retrieved successfully.",
+                puzzle
+            ));
         }
 
         // Bulmaca sonucunu gönderir.
@@ -67,7 +84,12 @@ namespace DailyChessPuzzleApi.Controllers
                     "Puzzle submission rejected. ClientId is missing."
                 );
 
-                return BadRequest("ClientId is required.");
+                return BadRequest(ResponseFactory.Failure<object>(
+                    HttpContext,
+                    "ClientId is required.",
+                    400,
+                    "CLIENT_ID_REQUIRED"
+                ));
             }
 
             if (request.ClientId.Length > 100)
@@ -76,7 +98,12 @@ namespace DailyChessPuzzleApi.Controllers
                     "Puzzle submission rejected. ClientId exceeds maximum length."
                 );
 
-                return BadRequest("ClientId is too long.");
+                return BadRequest(ResponseFactory.Failure<object>(
+                    HttpContext,
+                    "ClientId is too long.",
+                    400,
+                    "CLIENT_ID_TOO_LONG"
+                ));
             }
 
             if (request.CountryCode != null &&
@@ -86,9 +113,12 @@ namespace DailyChessPuzzleApi.Controllers
                     "Puzzle submission rejected. Invalid CountryCode length."
                 );
 
-                return BadRequest(
-                    "CountryCode must contain 2 characters."
-                );
+                return BadRequest(ResponseFactory.Failure<object>(
+                    HttpContext,
+                    "CountryCode must contain 2 characters.",
+                    400,
+                    "INVALID_COUNTRY_CODE"
+                ));
             }
 
             var response = await _puzzleService.SubmitAsync(
@@ -96,7 +126,11 @@ namespace DailyChessPuzzleApi.Controllers
                 cancellationToken
             );
 
-            return Ok(response);
+            return Ok(ResponseFactory.Success(
+                HttpContext,
+                "Puzzle submission completed successfully.",
+                response
+            ));
         }
     }
 }

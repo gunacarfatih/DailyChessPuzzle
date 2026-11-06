@@ -1,5 +1,6 @@
 ﻿
 using DailyChessPuzzleApi.Services.Interfaces;
+using DailyChessPuzzleApi.Responses;
 using Microsoft.AspNetCore.Mvc;
 
 namespace DailyChessPuzzleApi.Controllers
@@ -19,6 +20,7 @@ namespace DailyChessPuzzleApi.Controllers
             _logger = logger;
         }
 
+        // Liderlik tablosunu getirir.
         [HttpGet]
         public async Task<IActionResult> GetLeaderboard(
             [FromQuery] string period = "daily",
@@ -32,6 +34,7 @@ namespace DailyChessPuzzleApi.Controllers
                 country ?? "Global"
             );
 
+            // Liderlik tablosu servisinden veriler alınır.
             var response = await _leaderboardService.GetLeaderboardAsync(
                 period,
                 country,
@@ -39,7 +42,14 @@ namespace DailyChessPuzzleApi.Controllers
                 cancellationToken
             );
 
-            return Ok(response);
+            // Başarılı cevap ResponseFactory üzerinden oluşturulur.
+            var baseResponse = ResponseFactory.Success(
+                HttpContext,
+                "Leaderboard retrieved successfully.",
+                response
+            );
+
+            return Ok(baseResponse);
         }
     }
 }
