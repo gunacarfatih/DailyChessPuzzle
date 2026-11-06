@@ -1,6 +1,1 @@
 @DailyChessPuzzleApi_HostAddress = http://localhost:5053
-
-GET {{DailyChessPuzzleApi_HostAddress}}/weatherforecast/
-Accept: application/json
-
-###

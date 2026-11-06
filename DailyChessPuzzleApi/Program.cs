@@ -1,4 +1,5 @@
-
+using DailyChessPuzzleApi.Services;
+using DailyChessPuzzleApi.Services.Interfaces;
 using DailyChessPuzzleApi.Data;
 using Microsoft.EntityFrameworkCore;
 
@@ -13,6 +14,9 @@ builder.Services.AddDbContext<ApplicationDbContext>(options =>
 
 // Controller servisleri
 builder.Services.AddControllers();
+
+builder.Services.AddScoped<IPuzzleService, PuzzleService>();
+builder.Services.AddScoped<ILeaderboardService, LeaderboardService>();
 
 // Swagger servisleri
 builder.Services.AddEndpointsApiExplorer();
