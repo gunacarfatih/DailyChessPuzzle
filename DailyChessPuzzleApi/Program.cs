@@ -13,11 +13,6 @@ using System.Runtime.InteropServices;
 
 var builder = WebApplication.CreateBuilder(args);
 
-
-// ==================================================
-// 1. LOG DOSYASI YAPILANDIRMASI
-// ==================================================
-
 // İşletim sistemine göre log dosyalarının tutulacağı klasör belirlenir.
 var logDirectory = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
     ? "C:/DailyChess/logs"
@@ -28,11 +23,6 @@ Directory.CreateDirectory(logDirectory);
 
 // Log dosyasının yolu belirlenir.
 var logFilePath = Path.Combine(logDirectory, "log-.txt");
-
-
-// ==================================================
-// 2. SERILOG YAPILANDIRMASI
-// ==================================================
 
 // Uygulamanın log kayıtları Serilog üzerinden yönetilir.
 builder.Host.UseSerilog((context, configuration) =>
@@ -47,11 +37,6 @@ builder.Host.UseSerilog((context, configuration) =>
         );
 });
 
-
-// ==================================================
-// 3. VERİTABANI YAPILANDIRMASI
-// ==================================================
-
 // PostgreSQL bağlantısı ApplicationDbContext üzerinden yönetilir.
 // Bağlantı bilgileri appsettings veya User Secrets içerisindeki
 // DefaultConnection ayarından okunur.
@@ -60,11 +45,6 @@ builder.Services.AddDbContext<ApplicationDbContext>(options =>
         builder.Configuration.GetConnectionString("DefaultConnection")
     )
 );
-
-
-// ==================================================
-// 4. CONTROLLER VE MODEL DOĞRULAMA YAPILANDIRMASI
-// ==================================================
 
 // API Controller servisleri kaydedilir.
 builder.Services.AddControllers();
@@ -96,37 +76,21 @@ builder.Services.Configure<ApiBehaviorOptions>(options =>
     };
 });
 
-
-// ==================================================
-// 5. SERVICE (İŞ MANTIĞI) KAYITLARI
-// ==================================================
-
 // PuzzleService, IPuzzleService arayüzü üzerinden kullanılır.
 builder.Services.AddScoped<IPuzzleService, PuzzleService>();
 
 // LeaderboardService, ILeaderboardService arayüzü üzerinden kullanılır.
 builder.Services.AddScoped<ILeaderboardService, LeaderboardService>();
 
+builder.Services.AddScoped<IDailyPuzzleService, DailyPuzzleService>();
 
-// ==================================================
-// 6. SWAGGER YAPILANDIRMASI
-// ==================================================
+builder.Services.AddHostedService<DailyPuzzleBackgroundService>();
 
 // API endpointlerinin Swagger üzerinden görüntülenmesini sağlar.
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
-
-// ==================================================
-// 7. UYGULAMANIN OLUŞTURULMASI
-// ==================================================
-
 var app = builder.Build();
-
-
-// ==================================================
-// 8. MIDDLEWARE (ARA YAZILIM) YAPILANDIRMASI
-// ==================================================
 
 // Her HTTP isteğine benzersiz bir Correlation ID atanır.
 app.UseMiddleware<CorrelationIdMiddleware>();
@@ -138,22 +102,12 @@ app.UseMiddleware<GlobalExceptionMiddleware>();
 // HTTP isteklerinin Serilog üzerinden loglanmasını sağlar.
 app.UseSerilogRequestLogging();
 
-
-// ==================================================
-// 9. SWAGGER ARAYÜZÜ
-// ==================================================
-
 // Swagger yalnızca Development ortamında etkinleştirilir.
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
     app.UseSwaggerUI();
 }
-
-
-// ==================================================
-// 10. HTTP İSTEK YÖNLENDİRME VE YETKİLENDİRME
-// ==================================================
 
 // HTTP isteklerini HTTPS'e yönlendirir.
 app.UseHttpsRedirection();
@@ -163,10 +117,5 @@ app.UseAuthorization();
 
 // Controller endpointleri uygulamaya tanıtılır.
 app.MapControllers();
-
-
-// ==================================================
-// 11. UYGULAMANIN BAŞLATILMASI
-// ==================================================
 
 app.Run();
