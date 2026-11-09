@@ -46,6 +46,111 @@ namespace DailyChessPuzzleApi.Migrations
                     b.ToTable("DailyPuzzles");
                 });
 
+            modelBuilder.Entity("DailyChessPuzzleApi.Models.LeaderboardCacheOutbox", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("CacheKey")
+                        .IsRequired()
+                        .HasMaxLength(300)
+                        .HasColumnType("character varying(300)");
+
+                    b.Property<string>("ClientId")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<string>("CountryCode")
+                        .HasMaxLength(2)
+                        .HasColumnType("character varying(2)");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<bool>("IsProcessed")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("Period")
+                        .IsRequired()
+                        .HasMaxLength(10)
+                        .HasColumnType("character varying(10)");
+
+                    b.Property<string>("PeriodKey")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<DateTime?>("ProcessedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("SolvedCount")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("TotalScore")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("IsProcessed", "CreatedAtUtc");
+
+                    b.ToTable("LeaderboardCacheOutbox");
+                });
+
+            modelBuilder.Entity("DailyChessPuzzleApi.Models.LeaderboardScore", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("ClientId")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<string>("CountryCode")
+                        .HasMaxLength(2)
+                        .HasColumnType("character varying(2)");
+
+                    b.Property<string>("Period")
+                        .IsRequired()
+                        .HasMaxLength(10)
+                        .HasColumnType("character varying(10)");
+
+                    b.Property<string>("PeriodKey")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<int>("SolvedCount")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("TotalScore")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime>("UpdatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ClientId", "Period", "PeriodKey")
+                        .IsUnique()
+                        .HasFilter("\"CountryCode\" IS NULL");
+
+                    b.HasIndex("ClientId", "Period", "PeriodKey", "CountryCode")
+                        .IsUnique()
+                        .HasFilter("\"CountryCode\" IS NOT NULL");
+
+                    b.HasIndex("Period", "PeriodKey", "CountryCode", "TotalScore", "SolvedCount");
+
+                    b.ToTable("LeaderboardScores");
+                });
+
             modelBuilder.Entity("DailyChessPuzzleApi.Models.Puzzle", b =>
                 {
                     b.Property<int>("Id")
@@ -125,10 +230,14 @@ namespace DailyChessPuzzleApi.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("PlayedOn");
+
                     b.HasIndex("PuzzleId");
 
                     b.HasIndex("ClientId", "PuzzleId")
                         .IsUnique();
+
+                    b.HasIndex("CountryCode", "PlayedOn");
 
                     b.ToTable("PuzzleAttempts");
                 });

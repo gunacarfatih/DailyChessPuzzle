@@ -1,10 +1,13 @@
 
+using ReusableCaching.Extensions;
 using DailyChessPuzzleApi.Services;
 using DailyChessPuzzleApi.Services.Interfaces;
 using DailyChessPuzzleApi.Data;
 using DailyChessPuzzleApi.Middlewares;
 using DailyChessPuzzleApi.Responses;
+using DailyChessPuzzleApi.Settings;
 
+using StackExchange.Redis;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Mvc;
 
@@ -13,18 +16,52 @@ using System.Runtime.InteropServices;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// İşletim sistemine göre log dosyalarının tutulacağı klasör belirlenir.
+// Leaderboard ayarlarını appsettings.json üzerinden yükle.
+builder.Services.Configure<LeaderboardSettings>(
+    builder.Configuration.GetSection("LeaderboardSettings"));
+
+// Redis veya Memory cache altyapısını yapılandırır.
+builder.Services.AddReusableCaching(builder.Configuration);
+
+// Redis bağlantısını uygulama boyunca tek bir instance olarak kullanır.
+builder.Services.AddSingleton<IConnectionMultiplexer>(_ =>
+{
+    var redisConnection = builder.Configuration
+        .GetConnectionString("Redis");
+
+    if (string.IsNullOrWhiteSpace(redisConnection))
+    {
+        throw new InvalidOperationException(
+            "Redis connection string bulunamadı.");
+    }
+
+    // Redis bağlantı ayarlarını oluştur.
+    var redisOptions = ConfigurationOptions.Parse(redisConnection);
+
+    // Redis kapalı olsa bile uygulamanın açılmasına izin ver.
+    // Bağlantı kesilirse ConnectionMultiplexer yeniden bağlanmayı dener.
+    redisOptions.AbortOnConnectFail = false;
+
+    return ConnectionMultiplexer.Connect(redisOptions);
+});
+
+// Leaderboard cache servisini DI sistemine kaydeder.
+builder.Services.AddSingleton<
+    ILeaderboardCacheService,
+    LeaderboardCacheService>();
+
+// İşletim sistemine göre log dosyalarının tutulacağı klasörü belirle.
 var logDirectory = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
     ? "C:/DailyChess/logs"
     : "/var/log/dailychess";
 
-// Log klasörü mevcut değilse oluşturulur.
+// Log klasörü mevcut değilse oluştur.
 Directory.CreateDirectory(logDirectory);
 
-// Log dosyasının yolu belirlenir.
+// Log dosyasının yolunu belirle.
 var logFilePath = Path.Combine(logDirectory, "log-.txt");
 
-// Uygulamanın log kayıtları Serilog üzerinden yönetilir.
+// Serilog yapılandırması.
 builder.Host.UseSerilog((context, configuration) =>
 {
     configuration
@@ -33,36 +70,32 @@ builder.Host.UseSerilog((context, configuration) =>
             path: logFilePath,
             rollingInterval: RollingInterval.Day,
             retainedFileCountLimit: 10,
-            outputTemplate: "[{Timestamp:yyyy-MM-dd HH:mm:ss} {Level:u3}] [{CorrelationId}] {Message:lj}{NewLine}{Exception}"
+            outputTemplate:
+                "[{Timestamp:yyyy-MM-dd HH:mm:ss} {Level:u3}] [{CorrelationId}] {Message:lj}{NewLine}{Exception}"
         );
 });
 
-// PostgreSQL bağlantısı ApplicationDbContext üzerinden yönetilir.
-// Bağlantı bilgileri appsettings veya User Secrets içerisindeki
-// DefaultConnection ayarından okunur.
+// PostgreSQL bağlantısını ApplicationDbContext üzerinden yapılandır.
 builder.Services.AddDbContext<ApplicationDbContext>(options =>
     options.UseNpgsql(
         builder.Configuration.GetConnectionString("DefaultConnection")
     )
 );
 
-// API Controller servisleri kaydedilir.
+// API Controller servislerini kaydet.
 builder.Services.AddControllers();
 
-// [ApiController] tarafından otomatik gerçekleştirilen
-// model doğrulama hatalarının BaseResponse formatında dönmesi sağlanır.
+// Model doğrulama hatalarını BaseResponse formatında döndür.
 builder.Services.Configure<ApiBehaviorOptions>(options =>
 {
     options.InvalidModelStateResponseFactory = context =>
     {
-        // Model doğrulama hataları toplanır.
         var errors = context.ModelState
             .Where(x => x.Value?.Errors.Count > 0)
             .SelectMany(x => x.Value!.Errors)
             .Select(x => x.ErrorMessage)
             .ToList();
 
-        // Hata cevabı ResponseFactory üzerinden oluşturulur.
         var response = ResponseFactory.Failure<object>(
             context.HttpContext,
             "One or more validation errors occurred.",
@@ -71,35 +104,43 @@ builder.Services.Configure<ApiBehaviorOptions>(options =>
             errors
         );
 
-        // HTTP 400 Bad Request ile cevap döndürülür.
         return new BadRequestObjectResult(response);
     };
 });
 
-// PuzzleService, IPuzzleService arayüzü üzerinden kullanılır.
+// PuzzleService kaydı.
 builder.Services.AddScoped<IPuzzleService, PuzzleService>();
 
-// LeaderboardService, ILeaderboardService arayüzü üzerinden kullanılır.
+// LeaderboardService kaydı.
 builder.Services.AddScoped<ILeaderboardService, LeaderboardService>();
 
+// Leaderboard Outbox servisi.
+builder.Services.AddScoped<
+    ILeaderboardOutboxService,
+    LeaderboardOutboxService>();
+
+// Günlük puzzle atama servisi.
 builder.Services.AddScoped<IDailyPuzzleService, DailyPuzzleService>();
 
+// Günlük puzzle atama arka plan servisi.
 builder.Services.AddHostedService<DailyPuzzleBackgroundService>();
 
-// API endpointlerinin Swagger üzerinden görüntülenmesini sağlar.
+// Leaderboard Outbox arka plan servisi.
+builder.Services.AddHostedService<LeaderboardOutboxBackgroundService>();
+
+// Swagger servisleri.
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
 var app = builder.Build();
 
-// Her HTTP isteğine benzersiz bir Correlation ID atanır.
+// Her HTTP isteğine benzersiz Correlation ID atanır.
 app.UseMiddleware<CorrelationIdMiddleware>();
 
-// Uygulama içerisinde oluşan beklenmeyen hatalar yakalanır
-// ve standart BaseResponse formatında döndürülür.
+// Beklenmeyen hataları yakalar.
 app.UseMiddleware<GlobalExceptionMiddleware>();
 
-// HTTP isteklerinin Serilog üzerinden loglanmasını sağlar.
+// HTTP isteklerini loglar.
 app.UseSerilogRequestLogging();
 
 // Swagger yalnızca Development ortamında etkinleştirilir.
@@ -109,13 +150,13 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI();
 }
 
-// HTTP isteklerini HTTPS'e yönlendirir.
+// HTTPS yönlendirmesi.
 app.UseHttpsRedirection();
 
-// Yetkilendirme middleware'i etkinleştirilir.
+// Yetkilendirme middleware'i.
 app.UseAuthorization();
 
-// Controller endpointleri uygulamaya tanıtılır.
+// Controller endpointlerini eşleştir.
 app.MapControllers();
 
 app.Run();

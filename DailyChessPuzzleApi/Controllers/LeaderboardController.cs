@@ -20,25 +20,33 @@ namespace DailyChessPuzzleApi.Controllers
             _logger = logger;
         }
 
-        // Liderlik tablosunu getirir.
+        // Günlük, haftalık, aylık, tüm zamanlar
+        // ve isteğe bağlı özel tarih aralığı leaderboard verilerini getirir.
         [HttpGet]
         public async Task<IActionResult> GetLeaderboard(
-            [FromQuery] string period = "daily",
             [FromQuery] string? country = null,
             [FromQuery] string? clientId = null,
+            [FromQuery] int limit = 0,
+            [FromQuery] DateOnly? startDate = null,
+            [FromQuery] DateOnly? endDate = null,
             CancellationToken cancellationToken = default)
         {
             _logger.LogInformation(
-                "GET leaderboard request received. Period: {Period}, Country: {Country}",
-                period,
-                country ?? "Global"
+                "GET leaderboard request received. Country: {Country}, ClientId: {ClientId}, Limit: {Limit}, StartDate: {StartDate}, EndDate: {EndDate}",
+                country ?? "Global",
+                clientId,
+                limit,
+                startDate,
+                endDate
             );
 
             // Liderlik tablosu servisinden veriler alınır.
             var response = await _leaderboardService.GetLeaderboardAsync(
-                period,
                 country,
                 clientId,
+                limit,
+                startDate,
+                endDate,
                 cancellationToken
             );
 

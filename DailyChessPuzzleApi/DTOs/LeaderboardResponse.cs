@@ -1,13 +1,21 @@
-﻿namespace DailyChessPuzzleApi.DTOs
+﻿
+namespace DailyChessPuzzleApi.DTOs
 {
     public class LeaderboardResponse
     {
-        public string Period { get; set; } = string.Empty;
+        // Günlük sıralama.
+        public LeaderboardPeriodDto Daily { get; set; } = new();
 
-        public string? Country { get; set; }
+        // Haftalık sıralama.
+        public LeaderboardPeriodDto Weekly { get; set; } = new();
 
-        public List<LeaderboardEntryDto> Rankings { get; set; } = new();
+        // Aylık sıralama.
+        public LeaderboardPeriodDto Monthly { get; set; } = new();
 
-        public LeaderboardEntryDto? CurrentUser { get; set; }
+        // Tüm zamanların sıralaması.
+        public LeaderboardPeriodDto AllTime { get; set; } = new();
+
+        // İsteğe bağlı özel tarih aralığı sıralaması.
+        public LeaderboardPeriodDto? CustomRange { get; set; }
     }
 }
