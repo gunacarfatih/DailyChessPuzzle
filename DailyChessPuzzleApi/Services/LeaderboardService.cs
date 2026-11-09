@@ -41,7 +41,6 @@ namespace DailyChessPuzzleApi.Services
             DateOnly? endDate,
             CancellationToken cancellationToken = default)
         {
-            // Limit değeri gönderilmemişse varsayılan değeri kullan.
             if (limit <= 0)
             {
                 limit = _settings.DefaultLimit;
@@ -54,12 +53,10 @@ namespace DailyChessPuzzleApi.Services
                     $"Limit must be between {_settings.MinLimit} and {_settings.MaxLimit}.");
             }
 
-            // Ülke kodunu doğrula.
             country = ValidateCountry(country);
 
             var today = DateOnly.FromDateTime(DateTime.UtcNow);
 
-            // Özel tarih aralığı parametrelerinin ikisi birlikte gönderilmelidir.
             if (startDate.HasValue != endDate.HasValue)
             {
                 throw new ArgumentException(
@@ -81,15 +78,9 @@ namespace DailyChessPuzzleApi.Services
                 }
             }
 
-            // ClientId değerini temizle.
-            if (!string.IsNullOrWhiteSpace(clientId))
-            {
-                clientId = clientId.Trim();
-            }
-            else
-            {
-                clientId = null;
-            }
+            clientId = string.IsNullOrWhiteSpace(clientId)
+                ? null
+                : clientId.Trim();
 
             // Günlük leaderboard.
             var daily = await GetFixedPeriodAsync(
@@ -102,7 +93,7 @@ namespace DailyChessPuzzleApi.Services
                 limit,
                 cancellationToken);
 
-            // Haftalık dönem: ISO standardına göre pazartesi başlangıcı.
+            // Haftalık leaderboard: ISO pazartesi başlangıcı.
             int daysSinceMonday =
                 ((int)today.DayOfWeek + 6) % 7;
 
@@ -126,7 +117,7 @@ namespace DailyChessPuzzleApi.Services
                 limit,
                 cancellationToken);
 
-            // Aylık dönem: takvim ayının ilk günü.
+            // Aylık leaderboard.
             var monthlyStartDate = new DateOnly(
                 today.Year,
                 today.Month,
@@ -142,7 +133,7 @@ namespace DailyChessPuzzleApi.Services
                 limit,
                 cancellationToken);
 
-            // Tüm zamanlar dönemi.
+            // Tüm zamanlar leaderboard.
             var allTime = await GetFixedPeriodAsync(
                 "alltime",
                 "all",
@@ -153,7 +144,7 @@ namespace DailyChessPuzzleApi.Services
                 limit,
                 cancellationToken);
 
-            // Özel tarih aralığı gönderildiyse oluştur.
+            // İsteğe bağlı özel tarih aralığı.
             LeaderboardPeriodDto? customRange = null;
 
             if (startDate.HasValue && endDate.HasValue)
@@ -183,7 +174,6 @@ namespace DailyChessPuzzleApi.Services
         }
 
         // Günlük, haftalık, aylık ve tüm zamanlar leaderboard verisini getirir.
-        // Redis çalışmıyorsa PostgreSQL üzerinden devam eder.
         private async Task<LeaderboardPeriodDto> GetFixedPeriodAsync(
             string period,
             string periodKey,
@@ -201,7 +191,6 @@ namespace DailyChessPuzzleApi.Services
 
             try
             {
-                // Önce Redis kontrol edilir.
                 bool cacheExists = await _cacheService.ExistsAsync(cacheKey);
 
                 if (!cacheExists)
@@ -218,7 +207,6 @@ namespace DailyChessPuzzleApi.Services
                     cacheKey,
                     limit);
 
-                // Redis boşsa PostgreSQL üzerinden yeniden oluştur.
                 if (topEntries.Count == 0)
                 {
                     await RebuildCacheAsync(
@@ -288,7 +276,6 @@ namespace DailyChessPuzzleApi.Services
                         clientId);
                 }
 
-                // Redis'te kullanıcı bulunamadıysa PostgreSQL'den getir.
                 if (currentUser == null)
                 {
                     currentUser = await GetCurrentUserFromDatabaseAsync(
@@ -310,8 +297,8 @@ namespace DailyChessPuzzleApi.Services
             };
         }
 
-        // Özel tarih aralığını günlük Redis verilerinden oluşturur.
-        // Redis erişilemiyorsa PostgreSQL üzerinden hesaplar.
+        // Özel tarih aralığını Redis üzerinden oluşturur.
+        // Eksik günlük cache kayıtlarını PostgreSQL'den tamamlar.
         private async Task<LeaderboardPeriodDto> GetCustomRangeAsync(
             DateOnly startDate,
             DateOnly endDate,
@@ -321,7 +308,6 @@ namespace DailyChessPuzzleApi.Services
             CancellationToken cancellationToken)
         {
             List<(string ClientId, int TotalScore, int SolvedCount)> topEntries;
-
             LeaderboardEntryDto? currentUser = null;
 
             try
@@ -329,46 +315,47 @@ namespace DailyChessPuzzleApi.Services
                 var dailyKeys = new List<string>();
                 var versionKeys = new List<string>();
 
-                // Başlangıç ve bitiş günleri dahil olmak üzere
-                // her günün Redis anahtarını oluştur.
-                for (
-                    var date = startDate;
-                    date <= endDate;
-                    date = date.AddDays(1))
+                // Tarih aralığındaki bütün günlük Redis kayıtlarını hazırla.
+                for (var date = startDate;
+                     date <= endDate;
+                     date = date.AddDays(1))
                 {
                     string dailyKey =
                         $"DailyChessPuzzle_leaderboard:daily:{date:yyyy-MM-dd}:{country ?? "global"}";
 
+                    string versionKey = $"{dailyKey}:version";
+
+                    await EnsureDailyCacheReadyAsync(
+                        dailyKey,
+                        versionKey,
+                        date,
+                        country,
+                        cancellationToken);
+
                     dailyKeys.Add(dailyKey);
-                    versionKeys.Add($"{dailyKey}:version");
+                    versionKeys.Add(versionKey);
                 }
 
-                // Günlük versiyonları okuyarak özel aralık önbelleğinin
-                // güncelliğini belirle.
+                // Günlük cache versiyonlarını oku.
                 var versions = new List<long>();
 
                 foreach (var versionKey in versionKeys)
                 {
-                    long version = await _cacheService.GetVersionAsync(
-                        versionKey);
-
-                    versions.Add(version);
+                    versions.Add(
+                        await _cacheService.GetVersionAsync(versionKey));
                 }
 
-                // Versiyon listesinden kısa ve sabit bir parmak izi üret.
+                // Versiyonlardan fingerprint üret.
                 string versionData = string.Join(",", versions);
 
                 string versionFingerprint = Convert.ToHexString(
                     SHA256.HashData(
-                        Encoding.UTF8.GetBytes(versionData)
-                    )
-                )[..16];
+                        Encoding.UTF8.GetBytes(versionData)))
+                    [..16];
 
-                // Günlük veriler değişirse yeni bir özel aralık anahtarı oluşur.
                 string rangeKey =
                     $"DailyChessPuzzle_leaderboard:custom:{startDate:yyyy-MM-dd}:{endDate:yyyy-MM-dd}:{country ?? "global"}:{versionFingerprint}";
 
-                // Özel tarih aralığı cache kaydı yoksa oluştur.
                 bool cacheExists = await _cacheService.ExistsAsync(rangeKey);
 
                 if (!cacheExists)
@@ -379,12 +366,11 @@ namespace DailyChessPuzzleApi.Services
                         CustomRangeCacheDuration);
                 }
 
-                // İlk N kullanıcıyı Redis'ten getir.
                 topEntries = await _cacheService.GetTopAsync(
                     rangeKey,
                     limit);
 
-                // Kullanıcının kendi sıralamasını Redis'ten getir.
+                // Kullanıcının kendi sıralamasını getir.
                 if (clientId != null)
                 {
                     var userScore = await _cacheService.GetUserScoreAsync(
@@ -413,10 +399,9 @@ namespace DailyChessPuzzleApi.Services
             catch (Exception ex) when (
                 ex is not OperationCanceledException)
             {
-                // Redis erişilemiyorsa PostgreSQL'e geç.
                 _logger.LogWarning(
                     ex,
-                    "Custom range Redis read failed. Falling back to PostgreSQL. StartDate: {StartDate}, EndDate: {EndDate}",
+                    "Custom range Redis operation failed. Falling back to PostgreSQL. StartDate: {StartDate}, EndDate: {EndDate}",
                     startDate,
                     endDate);
 
@@ -438,7 +423,6 @@ namespace DailyChessPuzzleApi.Services
                 }
             }
 
-            // Redis'te kullanıcı bulunamadıysa PostgreSQL'den getir.
             if (clientId != null && currentUser == null)
             {
                 currentUser = await GetCustomRangeCurrentUserFromDatabaseAsync(
@@ -459,6 +443,57 @@ namespace DailyChessPuzzleApi.Services
             };
         }
 
+        // Günlük Redis cache hazır değilse PostgreSQL'den yükler.
+        private async Task EnsureDailyCacheReadyAsync(
+            string dailyKey,
+            string versionKey,
+            DateOnly date,
+            string? country,
+            CancellationToken cancellationToken)
+        {
+            bool isReady = await _cacheService.IsDailyCacheReadyAsync(
+                dailyKey);
+
+            if (isReady)
+            {
+                return;
+            }
+
+            var entries = await _context.LeaderboardScores
+                .AsNoTracking()
+                .Where(x =>
+                    x.Period == "daily" &&
+                    x.PeriodKey == date.ToString("yyyy-MM-dd") &&
+                    x.CountryCode == country)
+                .Select(x => new
+                {
+                    x.ClientId,
+                    x.TotalScore,
+                    x.SolvedCount
+                })
+                .ToListAsync(cancellationToken);
+
+            var cacheEntries = entries
+                .Select(x => (
+                    x.ClientId,
+                    x.TotalScore,
+                    x.SolvedCount))
+                .ToList();
+
+            await _cacheService.RebuildDailyAsync(
+                dailyKey,
+                cacheEntries);
+
+            // Günlük cache oluşturulduğunda versiyonu artır.
+            await _cacheService.IncrementVersionAsync(versionKey);
+
+            _logger.LogInformation(
+                "Daily leaderboard cache initialized. Date: {Date}, Country: {Country}, UserCount: {UserCount}",
+                date,
+                country ?? "Global",
+                cacheEntries.Count);
+        }
+
         // PostgreSQL üzerinden özel tarih aralığının ilk N kullanıcısını getirir.
         private async Task<List<(string ClientId, int TotalScore, int SolvedCount)>>
             GetCustomRangeTopFromDatabaseAsync(
@@ -474,7 +509,6 @@ namespace DailyChessPuzzleApi.Services
                     x.PlayedOn >= startDate &&
                     x.PlayedOn <= endDate);
 
-            // Ülke filtresi gönderilmişse uygula.
             if (country != null)
             {
                 query = query.Where(x => x.CountryCode == country);
@@ -517,13 +551,11 @@ namespace DailyChessPuzzleApi.Services
                     x.PlayedOn >= startDate &&
                     x.PlayedOn <= endDate);
 
-            // Ülke filtresi gönderilmişse uygula.
             if (country != null)
             {
                 query = query.Where(x => x.CountryCode == country);
             }
 
-            // Kullanıcının toplam puanını ve çözdüğü bulmaca sayısını hesapla.
             var userEntry = await query
                 .Where(x => x.ClientId == clientId)
                 .GroupBy(x => x.ClientId)
@@ -540,8 +572,6 @@ namespace DailyChessPuzzleApi.Services
                 return null;
             }
 
-            // Daha yüksek puan veya eşit puanda daha fazla çözüm
-            // yapan kullanıcılar önde kabul edilir.
             var usersAhead = await query
                 .GroupBy(x => x.ClientId)
                 .Select(group => new
@@ -567,7 +597,6 @@ namespace DailyChessPuzzleApi.Services
         }
 
         // Redis'ten gelen kayıtları DTO'ya dönüştürür.
-        // Aynı puan ve çözüm sayısına sahip kullanıcılar aynı dereceyi alır.
         private static List<LeaderboardEntryDto> CreateRankings(
             List<(string ClientId, int TotalScore, int SolvedCount)> entries)
         {
@@ -603,7 +632,6 @@ namespace DailyChessPuzzleApi.Services
             return rankings;
         }
 
-        // Ülke kodunu doğrular ve standart biçime dönüştürür.
         private static string? ValidateCountry(string? country)
         {
             if (string.IsNullOrWhiteSpace(country))
@@ -632,7 +660,6 @@ namespace DailyChessPuzzleApi.Services
             return country;
         }
 
-        // PostgreSQL'den istenen sayıda kullanıcıyı getirir.
         private async Task<List<(string ClientId, int TotalScore, int SolvedCount)>>
             GetTopFromDatabaseAsync(
                 string period,
@@ -667,7 +694,6 @@ namespace DailyChessPuzzleApi.Services
                 .ToList();
         }
 
-        // PostgreSQL'deki leaderboard kayıtlarını Redis'e yeniden yükler.
         private async Task RebuildCacheAsync(
             string cacheKey,
             string period,
@@ -706,7 +732,6 @@ namespace DailyChessPuzzleApi.Services
                 cacheEntries.Count);
         }
 
-        // Kullanıcının kendi sırasını PostgreSQL'den hesaplar.
         private async Task<LeaderboardEntryDto?> GetCurrentUserFromDatabaseAsync(
             string period,
             string periodKey,
@@ -736,8 +761,6 @@ namespace DailyChessPuzzleApi.Services
                 return null;
             }
 
-            // Yalnızca puanı veya çözüm sayısı daha yüksek olanlar
-            // kullanıcının önünde kabul edilir.
             var usersAhead = await query
                 .CountAsync(x =>
                     x.TotalScore > userEntry.TotalScore ||

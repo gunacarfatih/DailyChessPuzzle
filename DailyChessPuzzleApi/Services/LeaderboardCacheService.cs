@@ -1,7 +1,7 @@
 ﻿
+using System.Globalization;
 using DailyChessPuzzleApi.Services.Interfaces;
 using StackExchange.Redis;
-using System.Globalization;
 
 namespace DailyChessPuzzleApi.Services
 {
@@ -9,66 +9,44 @@ namespace DailyChessPuzzleApi.Services
     {
         private readonly IDatabase _database;
 
-        // ZSET üyesinin başında çözülen bulmaca sayısının
-        // ters çevrilmiş değeri tutulur.
-        private const int MaxSolvedCount = int.MaxValue;
-
         public LeaderboardCacheService(IConnectionMultiplexer redis)
         {
             _database = redis.GetDatabase();
         }
 
-        // Sabit dönemlerin puanını ve çözüm sayısını günceller.
+        // Kullanıcının leaderboard puanını Redis'e kaydeder.
         public async Task UpdateScoreAsync(
             string key,
             string clientId,
             int totalScore,
             int solvedCount)
         {
-            if (totalScore < 0 || solvedCount < 0)
-            {
-                throw new ArgumentOutOfRangeException(
-                    nameof(totalScore),
-                    "Score and solved count cannot be negative.");
-            }
+            string member = CreateMember(clientId, solvedCount);
+            string membersKey = GetMemberKey(key);
 
-            // Kullanıcının önceki ZSET üyesini bul.
-            var memberKey = GetMemberKey(key);
-
-            var oldMember = await _database.HashGetAsync(
-                memberKey,
+            RedisValue oldMember = await _database.HashGetAsync(
+                membersKey,
                 clientId);
 
-            // Eski üye varsa ZSET'ten kaldır.
-            // Çünkü çözüm sayısı değiştiğinde üye anahtarı da değişir.
-            if (!oldMember.IsNullOrEmpty)
+            if (oldMember.HasValue)
             {
                 await _database.SortedSetRemoveAsync(
                     key,
-                    oldMember);
+                    oldMember.ToString());
             }
-
-            // Yüksek puanların önce gelmesi için negatif puan kullan.
-            double redisScore = -totalScore;
-
-            // Eşit puanda çözüm sayısı yüksek olan önce gelsin.
-            // Eşit puan ve çözüm sayısında ClientId alfabetik sıralanır.
-            string member = CreateMember(clientId, solvedCount);
 
             await _database.SortedSetAddAsync(
                 key,
                 member,
-                redisScore);
+                -(double)totalScore);
 
-            // ClientId -> ZSET üyesi eşlemesini sakla.
             await _database.HashSetAsync(
-                memberKey,
+                membersKey,
                 clientId,
                 member);
         }
 
-        // Günlük tabloyu günceller ve özel tarih aralığı
-        // önbelleklerinin versiyonunu artırır.
+        // Günlük puanı günceller ve cache versiyonunu artırır.
         public async Task UpdateDailyScoreAsync(
             string key,
             string versionKey,
@@ -82,20 +60,68 @@ namespace DailyChessPuzzleApi.Services
                 totalScore,
                 solvedCount);
 
-            // Günlük veri değiştiğinde versiyonu artır.
-            await _database.StringIncrementAsync(versionKey);
+            await IncrementVersionAsync(versionKey);
         }
 
-        // Redis ZSET üzerinden ilk N kullanıcıyı getirir.
-        public async Task<List<(string ClientId, int TotalScore, int SolvedCount)>> GetTopAsync(
-            string key,
-            int count)
+        // Günlük cache'in hazır olup olmadığını kontrol eder.
+        public async Task<bool> IsDailyCacheReadyAsync(string key)
         {
-            if (count <= 0)
+            return await _database.KeyExistsAsync(
+                GetDailyReadyKey(key));
+        }
+
+        // Günlük leaderboard cache'ini baştan oluşturur.
+        public async Task RebuildDailyAsync(
+            string key,
+            List<(string ClientId, int TotalScore, int SolvedCount)> entries)
+        {
+            await RebuildAsync(key, entries);
+
+            await _database.StringSetAsync(
+                GetDailyReadyKey(key),
+                "1");
+        }
+
+        // Kullanıcının puan ve çözdüğü bulmaca sayısını getirir.
+        public async Task<(int TotalScore, int SolvedCount)?> GetUserScoreAsync(
+            string key,
+            string clientId)
+        {
+            string membersKey = GetMemberKey(key);
+
+            RedisValue member = await _database.HashGetAsync(
+                membersKey,
+                clientId);
+
+            if (!member.HasValue)
             {
-                return new List<(string ClientId, int TotalScore, int SolvedCount)>();
+                return null;
             }
 
+            RedisValue score = await _database.SortedSetScoreAsync(
+                key,
+                member.ToString());
+
+            if (!score.HasValue)
+            {
+                return null;
+            }
+
+            var decoded = DecodeMember(member.ToString());
+
+            // RedisValue doğrudan negatiflenemez.
+            double numericScore = (double)score;
+            int totalScore = checked((int)(-numericScore));
+
+            return (
+                totalScore,
+                decoded.SolvedCount);
+        }
+
+        // Leaderboard'daki ilk N kullanıcıyı getirir.
+        public async Task<List<(string ClientId, int TotalScore, int SolvedCount)>>
+            GetTopAsync(string key, int count)
+        {
             var entries = await _database.SortedSetRangeByRankWithScoresAsync(
                 key,
                 0,
@@ -109,80 +135,56 @@ namespace DailyChessPuzzleApi.Services
             {
                 var decoded = DecodeMember(entry.Element.ToString());
 
+                int totalScore = checked(
+                    (int)(-entry.Score));
+
                 result.Add((
-                    ClientId: decoded.ClientId,
-                    TotalScore: checked((int)-entry.Score),
-                    SolvedCount: decoded.SolvedCount));
+                    decoded.ClientId,
+                    totalScore,
+                    decoded.SolvedCount));
             }
 
             return result;
         }
 
-        // Belirli bir kullanıcının puan bilgilerini getirir.
-        public async Task<(int TotalScore, int SolvedCount)?> GetUserScoreAsync(
-            string key,
-            string clientId)
-        {
-            var member = await _database.HashGetAsync(
-                GetMemberKey(key),
-                clientId);
-
-            if (member.IsNullOrEmpty)
-            {
-                return null;
-            }
-
-            var redisScore = await _database.SortedSetScoreAsync(
-                key,
-                member);
-
-            if (redisScore == null)
-            {
-                return null;
-            }
-
-            var decoded = DecodeMember(member.ToString());
-
-            return (
-                TotalScore: checked((int)-redisScore.Value),
-                SolvedCount: decoded.SolvedCount);
-        }
-
-        // Kullanıcının rekabetçi sıralamasını getirir.
+        // Kullanıcının Redis sıralamasını getirir.
         public async Task<long?> GetRankAsync(
             string key,
             string clientId)
         {
-            var member = await _database.HashGetAsync(
-                GetMemberKey(key),
+            string membersKey = GetMemberKey(key);
+
+            RedisValue member = await _database.HashGetAsync(
+                membersKey,
                 clientId);
 
-            if (member.IsNullOrEmpty)
+            if (!member.HasValue)
             {
                 return null;
             }
 
-            var rank = await _database.SortedSetRankAsync(
+            long? rank = await _database.SortedSetRankAsync(
                 key,
-                member,
+                member.ToString(),
                 Order.Ascending);
 
-            // Redis sıralaması sıfırdan başlar.
-            return rank.HasValue ? rank.Value + 1 : null;
+            return rank.HasValue
+                ? rank.Value + 1
+                : null;
         }
 
-        // Redis'te sıralama verisinin bulunup bulunmadığını kontrol eder.
+        // Redis anahtarının mevcut olup olmadığını kontrol eder.
         public async Task<bool> ExistsAsync(string key)
         {
             return await _database.KeyExistsAsync(key);
         }
 
-        // Günlük verilerin değişiklik versiyonunu getirir.
+        // Cache versiyonunu Redis'ten okur.
         public async Task<long> GetVersionAsync(string versionKey)
         {
-            var value = await _database.StringGetAsync(versionKey);
+            RedisValue value = await _database.StringGetAsync(versionKey);
 
-            if (value.IsNullOrEmpty)
+            if (!value.HasValue)
             {
                 return 0;
             }
@@ -191,67 +193,70 @@ namespace DailyChessPuzzleApi.Services
                 value.ToString(),
                 NumberStyles.Integer,
                 CultureInfo.InvariantCulture,
-                out var version)
-                ? version
-                : 0;
+                out long version)
+                    ? version
+                    : 0;
         }
 
-        // Günlük Redis tablolarını birleştirerek özel tarih aralığı
-        // için yeni bir ZSET ve HASH oluşturur.
+        // Cache versiyonunu bir artırır.
+        public Task<long> IncrementVersionAsync(string versionKey)
+        {
+            return _database.StringIncrementAsync(versionKey);
+        }
+
+        // Birden fazla günlük leaderboard verisini birleştirir.
         public async Task RebuildRangeAsync(
             string rangeKey,
             IReadOnlyCollection<string> dailyKeys,
             TimeSpan cacheDuration)
         {
-            // Kullanıcı bazında toplam puan ve çözüm sayısı.
-            var aggregates = new Dictionary<
+            var aggregated = new Dictionary<
                 string,
-                (long TotalScore, long SolvedCount)>();
+                (int TotalScore, int SolvedCount)>();
 
-            foreach (var dailyKey in dailyKeys)
+            foreach (string dailyKey in dailyKeys)
             {
-                // Günlük ZSET kayıtlarını Redis'ten getir.
-                var entries = await _database.SortedSetRangeByRankWithScoresAsync(
-                    dailyKey,
-                    0,
-                    -1,
-                    Order.Ascending);
+                var dailyEntries =
+                    await _database.SortedSetRangeByRankWithScoresAsync(
+                        dailyKey,
+                        0,
+                        -1,
+                        Order.Ascending);
 
-                foreach (var entry in entries)
+                foreach (var entry in dailyEntries)
                 {
-                    var decoded = DecodeMember(entry.Element.ToString());
+                    var decoded = DecodeMember(
+                        entry.Element.ToString());
 
-                    long dailyScore = checked((long)-entry.Score);
+                    int totalScore = checked(
+                        (int)(-entry.Score));
 
-                    if (aggregates.TryGetValue(
+                    if (aggregated.TryGetValue(
                         decoded.ClientId,
-                        out var current))
+                        out var existing))
                     {
-                        aggregates[decoded.ClientId] = (
-                            current.TotalScore + dailyScore,
-                            current.SolvedCount + decoded.SolvedCount);
+                        aggregated[decoded.ClientId] = (
+                            checked(existing.TotalScore + totalScore),
+                            checked(existing.SolvedCount + decoded.SolvedCount));
                     }
                     else
                     {
-                        aggregates[decoded.ClientId] = (
-                            dailyScore,
+                        aggregated[decoded.ClientId] = (
+                            totalScore,
                             decoded.SolvedCount);
                     }
                 }
             }
 
-            // Toplanan verileri standart Redis kayıtlarına dönüştür.
-            var rangeEntries = aggregates
+            var entries = aggregated
                 .Select(x => (
                     ClientId: x.Key,
-                    TotalScore: checked((int)x.Value.TotalScore),
-                    SolvedCount: checked((int)x.Value.SolvedCount)))
+                    TotalScore: x.Value.TotalScore,
+                    SolvedCount: x.Value.SolvedCount))
                 .ToList();
 
-            // Özel tarih aralığı ZSET ve HASH verilerini oluştur.
-            await RebuildAsync(rangeKey, rangeEntries);
+            await RebuildAsync(rangeKey, entries);
 
-            // Özel tarih aralığı önbelleğine süre sınırı koy.
             await _database.KeyExpireAsync(
                 rangeKey,
                 cacheDuration);
@@ -261,100 +266,123 @@ namespace DailyChessPuzzleApi.Services
                 cacheDuration);
         }
 
-        // PostgreSQL'den veya günlük Redis tablolarından
-        // hesaplanan sıralamayı Redis'e yeniden yükler.
+        // Verilen leaderboard verisini Redis'e baştan yazar.
         public async Task RebuildAsync(
             string key,
             List<(string ClientId, int TotalScore, int SolvedCount)> entries)
         {
-            var memberKey = GetMemberKey(key);
+            string membersKey = GetMemberKey(key);
 
-            // Eski ZSET ve HASH kayıtlarını temizle.
             await _database.KeyDeleteAsync(key);
-            await _database.KeyDeleteAsync(memberKey);
+            await _database.KeyDeleteAsync(membersKey);
 
             if (entries.Count == 0)
             {
                 return;
             }
 
-            var sortedSetEntries = entries
-                .Select(entry =>
-                {
-                    if (entry.TotalScore < 0 ||
-                        entry.SolvedCount < 0)
-                    {
-                        throw new ArgumentOutOfRangeException(
-                            nameof(entries),
-                            "Score and solved count cannot be negative.");
-                    }
+            var sortedSetEntries = new SortedSetEntry[entries.Count];
+            var hashEntries = new HashEntry[entries.Count];
 
-                    return new SortedSetEntry(
-                        CreateMember(entry.ClientId, entry.SolvedCount),
-                        -entry.TotalScore);
-                })
-                .ToArray();
+            for (int i = 0; i < entries.Count; i++)
+            {
+                var entry = entries[i];
 
-            var hashEntries = entries
-                .Select(entry => new HashEntry(
+                string member = CreateMember(
                     entry.ClientId,
-                    CreateMember(entry.ClientId, entry.SolvedCount)))
-                .ToArray();
+                    entry.SolvedCount);
 
-            // ZSET sıralama kayıtlarını yükle.
+                sortedSetEntries[i] = new SortedSetEntry(
+                    member,
+                    -(double)entry.TotalScore);
+
+                hashEntries[i] = new HashEntry(
+                    entry.ClientId,
+                    member);
+            }
+
             await _database.SortedSetAddAsync(
                 key,
                 sortedSetEntries);
 
-            // ClientId -> ZSET üyesi eşlemesini yükle.
             await _database.HashSetAsync(
-                memberKey,
+                membersKey,
                 hashEntries);
         }
 
-        // Çözüm sayısını ve ClientId değerini bir ZSET üyesine dönüştürür.
+        // Redis sıralamasında kullanılacak üye bilgisini oluşturur.
         private static string CreateMember(
             string clientId,
             int solvedCount)
         {
-            if (solvedCount < 0)
+            if (string.IsNullOrWhiteSpace(clientId))
             {
-                throw new ArgumentOutOfRangeException(nameof(solvedCount));
+                throw new ArgumentException(
+                    "ClientId cannot be empty.",
+                    nameof(clientId));
             }
 
-            int invertedSolvedCount = MaxSolvedCount - solvedCount;
+            if (solvedCount < 0)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(solvedCount));
+            }
+
+            int invertedSolvedCount = int.MaxValue - solvedCount;
 
             return $"{invertedSolvedCount:D10}:{clientId}";
         }
 
-        // ZSET üyesinden ClientId ve çözüm sayısını çıkarır.
-        private static (string ClientId, int SolvedCount) DecodeMember(
-            string member)
+        // Redis üye bilgisinden ClientId ve SolvedCount değerlerini ayırır.
+        private static (
+            string ClientId,
+            int SolvedCount) DecodeMember(string member)
         {
             int separatorIndex = member.IndexOf(':');
 
             if (separatorIndex < 0)
             {
                 throw new FormatException(
-                    "Invalid leaderboard Redis member.");
+                    "Invalid leaderboard Redis member format.");
             }
 
-            string invertedValue = member[..separatorIndex];
-            string clientId = member[(separatorIndex + 1)..];
+            string invertedSolvedCountText =
+                member[..separatorIndex];
 
-            int invertedSolvedCount = int.Parse(
-                invertedValue,
-                CultureInfo.InvariantCulture);
+            string clientId =
+                member[(separatorIndex + 1)..];
 
-            int solvedCount = MaxSolvedCount - invertedSolvedCount;
+            if (!int.TryParse(
+                invertedSolvedCountText,
+                NumberStyles.Integer,
+                CultureInfo.InvariantCulture,
+                out int invertedSolvedCount))
+            {
+                throw new FormatException(
+                    "Invalid solved count in leaderboard Redis member.");
+            }
+
+            if (string.IsNullOrWhiteSpace(clientId))
+            {
+                throw new FormatException(
+                    "ClientId cannot be empty in leaderboard Redis member.");
+            }
+
+            int solvedCount = int.MaxValue - invertedSolvedCount;
 
             return (clientId, solvedCount);
         }
 
-        // Her ZSET için ClientId -> ZSET üyesi HASH anahtarını oluşturur.
+        // Kullanıcı eşleştirmelerinin tutulduğu Redis HASH anahtarı.
         private static string GetMemberKey(string key)
         {
             return $"{key}:members";
+        }
+
+        // Günlük cache hazır bilgisinin tutulduğu Redis anahtarı.
+        private static string GetDailyReadyKey(string key)
+        {
+            return $"{key}:ready";
         }
     }
 }
