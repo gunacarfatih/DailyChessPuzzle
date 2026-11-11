@@ -12,6 +12,9 @@ namespace DailyChessPuzzleApi.Services
         private readonly ILeaderboardCacheService _cacheService;
         private readonly ILogger<LeaderboardOutboxService> _logger;
 
+        private static readonly TimeSpan LockDuration =
+            TimeSpan.FromMinutes(5);
+
         public LeaderboardOutboxService(
             ApplicationDbContext context,
             ILeaderboardCacheService cacheService,
@@ -25,120 +28,317 @@ namespace DailyChessPuzzleApi.Services
         public async Task ProcessPendingAsync(
             CancellationToken cancellationToken)
         {
-            // Henüz işlenmemiş görevleri getir.
-            var pendingTasks = await _context.LeaderboardCacheOutbox
-                .Where(x => !x.IsProcessed)
+            var now = DateTime.UtcNow;
+
+            var deliveryIds = await _context.LeaderboardCacheOutboxDeliveries
+                .AsNoTracking()
+                .Where(x =>
+                    x.Status == LeaderboardCacheOutboxDeliveryStatus.Pending ||
+                    (
+                        x.Status == LeaderboardCacheOutboxDeliveryStatus.Failed &&
+                        x.NextRetryAtUtc != null &&
+                        x.NextRetryAtUtc <= now
+                    ) ||
+                    (
+                        x.Status == LeaderboardCacheOutboxDeliveryStatus.Processing &&
+                        x.LockedUntilUtc != null &&
+                        x.LockedUntilUtc <= now
+                    ))
                 .OrderBy(x => x.CreatedAtUtc)
+                .Select(x => x.Id)
                 .Take(100)
                 .ToListAsync(cancellationToken);
 
-            foreach (var task in pendingTasks)
+            foreach (var deliveryId in deliveryIds)
             {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                string lockId = Guid.NewGuid().ToString("N");
+
+                bool lockAcquired = await TryAcquireLockAsync(
+                    deliveryId,
+                    lockId,
+                    cancellationToken);
+
+                if (!lockAcquired)
+                {
+                    continue;
+                }
+
+                var delivery = await _context.LeaderboardCacheOutboxDeliveries
+                    .AsNoTracking()
+                    .Include(x => x.Outbox)
+                    .FirstOrDefaultAsync(
+                        x => x.Id == deliveryId,
+                        cancellationToken);
+
+                if (delivery == null)
+                {
+                    continue;
+                }
+
                 try
                 {
-                    // Kullanıcının ilgili dönem ve ülke için
-                    // mevcut leaderboard kaydını bul.
-                    var leaderboardScore = await _context.LeaderboardScores
-                        .FirstOrDefaultAsync(x =>
-                            x.ClientId == task.ClientId &&
-                            x.Period == task.Period &&
-                            x.PeriodKey == task.PeriodKey &&
-                            x.CountryCode == task.CountryCode,
-                            cancellationToken
-                        );
+                    // Outbox ID, bu skor güncellemesinin revision değeridir.
+                    long incomingRevision = delivery.OutboxId;
 
-                    if (leaderboardScore == null)
+                    // Kullanıcının ilgili leaderboard kaydını atomik
+                    // revision kontrolüyle güncelle.
+                    var existingScore = await _context.LeaderboardScores
+                        .AsNoTracking()
+                        .FirstOrDefaultAsync(x =>
+                            x.ClientId == delivery.Outbox.ClientId &&
+                            x.Period == delivery.Period &&
+                            x.PeriodKey == delivery.PeriodKey &&
+                            x.CountryCode == delivery.CountryCode,
+                            cancellationToken);
+
+                    if (existingScore == null)
                     {
-                        // İlk kayıt ise yeni leaderboard satırı oluştur.
-                        leaderboardScore = new LeaderboardScore
+                        // İlk skor kaydı.
+                        var newScore = new LeaderboardScore
                         {
-                            ClientId = task.ClientId,
-                            Period = task.Period,
-                            PeriodKey = task.PeriodKey,
-                            CountryCode = task.CountryCode,
-                            TotalScore = task.TotalScore,
-                            SolvedCount = task.SolvedCount,
+                            ClientId = delivery.Outbox.ClientId,
+                            Period = delivery.Period,
+                            PeriodKey = delivery.PeriodKey,
+                            CountryCode = delivery.CountryCode,
+                            TotalScore = delivery.TotalScore,
+                            SolvedCount = delivery.SolvedCount,
+                            Revision = incomingRevision,
                             UpdatedAtUtc = DateTime.UtcNow
                         };
 
                         await _context.LeaderboardScores.AddAsync(
-                            leaderboardScore,
-                            cancellationToken
-                        );
+                            newScore,
+                            cancellationToken);
+
+                        await _context.SaveChangesAsync(cancellationToken);
                     }
-                    else
+                    else if (incomingRevision > existingScore.Revision)
                     {
-                        // Eski bir Outbox görevinin daha güncel veriyi
-                        // geriye götürmesini engelle.
-                        if (task.SolvedCount >= leaderboardScore.SolvedCount)
-                        {
-                            // Toplam puanı doğrudan güncelle.
-                            // Böylece aynı görev tekrar işlenirse
-                            // puanlar iki kez eklenmez.
-                            leaderboardScore.TotalScore = task.TotalScore;
-                            leaderboardScore.SolvedCount = task.SolvedCount;
-                            leaderboardScore.UpdatedAtUtc = DateTime.UtcNow;
-                        }
+                        // Yalnızca gelen revision daha yeniyse güncelle.
+                        // ExecuteUpdateAsync işlemi PostgreSQL üzerinde
+                        // tek bir atomik UPDATE sorgusu çalıştırır.
+                        await _context.LeaderboardScores
+                            .Where(x =>
+                                x.Id == existingScore.Id &&
+                                x.Revision < incomingRevision)
+                            .ExecuteUpdateAsync(setters => setters
+                                .SetProperty(
+                                    x => x.TotalScore,
+                                    delivery.TotalScore)
+                                .SetProperty(
+                                    x => x.SolvedCount,
+                                    delivery.SolvedCount)
+                                .SetProperty(
+                                    x => x.Revision,
+                                    incomingRevision)
+                                .SetProperty(
+                                    x => x.UpdatedAtUtc,
+                                    DateTime.UtcNow),
+                                cancellationToken);
                     }
 
-                    // Redis güncellemesi.
-                    // Günlük leaderboard için ayrıca versiyon artırılır.
-                    if (task.Period.Equals(
+                    // Yarış durumunda başka worker daha yeni bir revision
+                    // yazmış olabilir. Bu nedenle Redis'e doğrudan Delivery
+                    // verisini değil, PostgreSQL'deki güncel kaydı gönder.
+                    var currentScore = await _context.LeaderboardScores
+                        .AsNoTracking()
+                        .FirstOrDefaultAsync(x =>
+                            x.ClientId == delivery.Outbox.ClientId &&
+                            x.Period == delivery.Period &&
+                            x.PeriodKey == delivery.PeriodKey &&
+                            x.CountryCode == delivery.CountryCode,
+                            cancellationToken);
+
+                    if (currentScore == null)
+                    {
+                        throw new InvalidOperationException(
+                            "Leaderboard score could not be loaded after update.");
+                    }
+
+                    if (delivery.Period.Equals(
                         "daily",
                         StringComparison.OrdinalIgnoreCase))
                     {
-                        // Günlük leaderboard versiyon anahtarı.
-                        string versionKey = $"{task.CacheKey}:version";
+                        string versionKey = $"{delivery.CacheKey}:version";
 
                         await _cacheService.UpdateDailyScoreAsync(
-                            task.CacheKey,
+                            delivery.CacheKey,
                             versionKey,
-                            task.ClientId,
-                            task.TotalScore,
-                            task.SolvedCount
-                        );
+                            delivery.Outbox.ClientId,
+                            currentScore.TotalScore,
+                            currentScore.SolvedCount,
+                            currentScore.Revision);
                     }
                     else
                     {
-                        // Haftalık, aylık ve tüm zamanlar.
                         await _cacheService.UpdateScoreAsync(
-                            task.CacheKey,
-                            task.ClientId,
-                            task.TotalScore,
-                            task.SolvedCount
-                        );
+                            delivery.CacheKey,
+                            delivery.Outbox.ClientId,
+                            currentScore.TotalScore,
+                            currentScore.SolvedCount,
+                            currentScore.Revision);
                     }
 
-                    // Redis güncellemesi başarılı olduktan sonra
-                    // Outbox görevini tamamlandı olarak işaretle.
-                    task.IsProcessed = true;
-                    task.ProcessedAtUtc = DateTime.UtcNow;
+                    var processedAt = DateTime.UtcNow;
 
-                    // PostgreSQL leaderboard kaydı ve Outbox durumu
-                    // aynı SaveChanges çağrısında kaydedilir.
-                    await _context.SaveChangesAsync(cancellationToken);
+                    int completedRows = await _context
+                        .LeaderboardCacheOutboxDeliveries
+                        .Where(x =>
+                            x.Id == deliveryId &&
+                            x.Status == LeaderboardCacheOutboxDeliveryStatus.Processing &&
+                            x.LockedBy == lockId)
+                        .ExecuteUpdateAsync(setters => setters
+                            .SetProperty(
+                                x => x.Status,
+                                LeaderboardCacheOutboxDeliveryStatus.Completed)
+                            .SetProperty(
+                                x => x.ProcessedAtUtc,
+                                processedAt)
+                            .SetProperty(
+                                x => x.NextRetryAtUtc,
+                                (DateTime?)null)
+                            .SetProperty(
+                                x => x.LockedUntilUtc,
+                                (DateTime?)null)
+                            .SetProperty(
+                                x => x.LockedBy,
+                                (string?)null)
+                            .SetProperty(
+                                x => x.LastError,
+                                (string?)null),
+                            cancellationToken);
+
+                    if (completedRows == 0)
+                    {
+                        _logger.LogWarning(
+                            "Delivery completion skipped because the lock is no longer owned by this worker. DeliveryId: {DeliveryId}",
+                            deliveryId);
+
+                        continue;
+                    }
 
                     _logger.LogInformation(
-                        "Leaderboard güncellendi. Period: {Period}, ClientId: {ClientId}, Country: {Country}",
-                        task.Period,
-                        task.ClientId,
-                        task.CountryCode ?? "Global"
-                    );
+                        "Leaderboard Delivery completed. DeliveryId: {DeliveryId}, Period: {Period}, ClientId: {ClientId}, Country: {Country}, Revision: {Revision}",
+                        delivery.Id,
+                        delivery.Period,
+                        delivery.Outbox.ClientId,
+                        delivery.CountryCode ?? "Global",
+                        currentScore.Revision);
+                }
+                catch (OperationCanceledException)
+                    when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
                 }
                 catch (Exception ex)
                 {
-                    // Redis veya PostgreSQL işlemi başarısızsa
-                    // görev tamamlanmış sayılmaz.
+                    // Başarısız insert gibi durumlarda EF ChangeTracker'da
+                    // hatalı Added kayıt kalmasını önle.
+                    _context.ChangeTracker.Clear();
+
+                    int retryCount = delivery.RetryCount + 1;
+
+                    int retryDelayMinutes = Math.Min(
+                        (int)Math.Pow(2, retryCount),
+                        30);
+
+                    string errorMessage = ex.Message.Length > 2000
+                        ? ex.Message[..2000]
+                        : ex.Message;
+
+                    var nextRetryAt = DateTime.UtcNow.AddMinutes(
+                        retryDelayMinutes);
+
+                    try
+                    {
+                        await _context
+                            .LeaderboardCacheOutboxDeliveries
+                            .Where(x =>
+                                x.Id == deliveryId &&
+                                x.Status == LeaderboardCacheOutboxDeliveryStatus.Processing &&
+                                x.LockedBy == lockId)
+                            .ExecuteUpdateAsync(setters => setters
+                                .SetProperty(
+                                    x => x.Status,
+                                    LeaderboardCacheOutboxDeliveryStatus.Failed)
+                                .SetProperty(
+                                    x => x.RetryCount,
+                                    retryCount)
+                                .SetProperty(
+                                    x => x.LastError,
+                                    errorMessage)
+                                .SetProperty(
+                                    x => x.NextRetryAtUtc,
+                                    nextRetryAt)
+                                .SetProperty(
+                                    x => x.LockedUntilUtc,
+                                    (DateTime?)null)
+                                .SetProperty(
+                                    x => x.LockedBy,
+                                    (string?)null),
+                                cancellationToken);
+                    }
+                    catch (Exception saveException)
+                    {
+                        _logger.LogError(
+                            saveException,
+                            "Delivery failure state could not be saved. DeliveryId: {DeliveryId}",
+                            deliveryId);
+                    }
+
                     _logger.LogError(
                         ex,
-                        "Leaderboard Outbox görevi işlenemedi. TaskId: {TaskId}",
-                        task.Id
-                    );
-
-                    // Sıralı işlemeyi korumak için sonraki görevlere geçme.
-                    break;
+                        "Leaderboard Delivery failed. DeliveryId: {DeliveryId}, RetryCount: {RetryCount}",
+                        deliveryId,
+                        retryCount);
                 }
             }
+        }
+
+        // PostgreSQL üzerinde atomik kilit alma işlemi.
+        private async Task<bool> TryAcquireLockAsync(
+            int deliveryId,
+            string lockId,
+            CancellationToken cancellationToken)
+        {
+            var now = DateTime.UtcNow;
+            var lockUntil = now.Add(LockDuration);
+
+            int affectedRows = await _context
+                .LeaderboardCacheOutboxDeliveries
+                .Where(x =>
+                    x.Id == deliveryId &&
+                    (
+                        x.Status == LeaderboardCacheOutboxDeliveryStatus.Pending ||
+                        (
+                            x.Status == LeaderboardCacheOutboxDeliveryStatus.Failed &&
+                            x.NextRetryAtUtc != null &&
+                            x.NextRetryAtUtc <= now
+                        ) ||
+                        (
+                            x.Status == LeaderboardCacheOutboxDeliveryStatus.Processing &&
+                            x.LockedUntilUtc != null &&
+                            x.LockedUntilUtc <= now
+                        )
+                    ))
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(
+                        x => x.Status,
+                        LeaderboardCacheOutboxDeliveryStatus.Processing)
+                    .SetProperty(
+                        x => x.LockedBy,
+                        lockId)
+                    .SetProperty(
+                        x => x.LockedUntilUtc,
+                        lockUntil)
+                    .SetProperty(
+                        x => x.LastError,
+                        (string?)null),
+                    cancellationToken);
+
+            return affectedRows == 1;
         }
     }
 }

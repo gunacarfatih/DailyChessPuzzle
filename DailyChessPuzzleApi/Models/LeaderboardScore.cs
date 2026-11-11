@@ -8,7 +8,7 @@ namespace DailyChessPuzzleApi.Models
         // Kullanıcının kimliği.
         public string ClientId { get; set; } = string.Empty;
 
-        // Liderlik tablosunun dönemi: daily, weekly veya monthly.
+        // Liderlik tablosunun dönemi: daily, weekly, monthly veya alltime.
         public string Period { get; set; } = string.Empty;
 
         // Dönemin anahtarı: 2026-11-09, 2026-W46 veya 2026-11.
@@ -22,6 +22,10 @@ namespace DailyChessPuzzleApi.Models
 
         // Kullanıcının ilgili dönemde çözdüğü bulmaca sayısı.
         public int SolvedCount { get; set; }
+
+        // Bu skorun hangi Outbox güncellemesine ait olduğunu belirtir.
+        // Daha büyük değer, daha yeni bir güncelleme anlamına gelir.
+        public long Revision { get; set; }
 
         // Son güncelleme zamanı.
         public DateTime UpdatedAtUtc { get; set; } = DateTime.UtcNow;

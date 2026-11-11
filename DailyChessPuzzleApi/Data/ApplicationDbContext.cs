@@ -15,8 +15,11 @@ namespace DailyChessPuzzleApi.Data
         public DbSet<DailyPuzzle> DailyPuzzles { get; set; }
         public DbSet<PuzzleAttempt> PuzzleAttempts { get; set; }
 
-        // Redis leaderboard güncelleme görevleri.
+        // Ana Outbox olayları.
         public DbSet<LeaderboardCacheOutbox> LeaderboardCacheOutbox { get; set; }
+
+        // Her Outbox olayına bağlı bağımsız teslimatlar.
+        public DbSet<LeaderboardCacheOutboxDelivery> LeaderboardCacheOutboxDeliveries { get; set; }
 
         // Kullanıcıların dönemsel leaderboard puan özetleri.
         public DbSet<LeaderboardScore> LeaderboardScores { get; set; }
@@ -25,77 +28,127 @@ namespace DailyChessPuzzleApi.Data
         {
             base.OnModelCreating(modelBuilder);
 
-            // Lichess puzzle ID benzersiz olmalı.
             modelBuilder.Entity<Puzzle>()
                 .HasIndex(x => x.LichessPuzzleId)
                 .IsUnique();
 
-            // Her tarih için yalnızca bir günlük puzzle atanabilir.
             modelBuilder.Entity<DailyPuzzle>()
                 .HasIndex(x => x.PuzzleDate)
                 .IsUnique();
 
-            // DailyPuzzle - Puzzle ilişkisi.
             modelBuilder.Entity<DailyPuzzle>()
                 .HasOne(x => x.Puzzle)
                 .WithMany(x => x.DailyPuzzles)
                 .HasForeignKey(x => x.PuzzleId)
                 .OnDelete(DeleteBehavior.Restrict);
 
-            // PuzzleAttempt - Puzzle ilişkisi.
             modelBuilder.Entity<PuzzleAttempt>()
                 .HasOne(x => x.Puzzle)
                 .WithMany()
                 .HasForeignKey(x => x.PuzzleId);
 
-            // Bir kullanıcı aynı puzzle için yalnızca bir deneme kaydedebilir.
             modelBuilder.Entity<PuzzleAttempt>()
                 .HasIndex(x => new { x.ClientId, x.PuzzleId })
                 .IsUnique();
 
-            // Denemelerin tarih bazlı sorgulanmasını hızlandırır.
             modelBuilder.Entity<PuzzleAttempt>()
                 .HasIndex(x => x.PlayedOn);
 
-            // Ülke ve tarih bazlı leaderboard sorgularını hızlandırır.
             modelBuilder.Entity<PuzzleAttempt>()
                 .HasIndex(x => new { x.CountryCode, x.PlayedOn });
 
-            // Bekleyen Outbox görevlerini hızlı bulabilmek için indeks.
-            modelBuilder.Entity<LeaderboardCacheOutbox>()
-                .HasIndex(x => new { x.IsProcessed, x.CreatedAtUtc });
+            // -----------------------------------------
+            // LEADERBOARD OUTBOX
+            // -----------------------------------------
 
-            // Outbox dönem bilgisi zorunlu olsun.
             modelBuilder.Entity<LeaderboardCacheOutbox>()
+                .HasIndex(x => x.PuzzleAttemptId)
+                .IsUnique();
+
+            modelBuilder.Entity<LeaderboardCacheOutbox>()
+                .HasIndex(x => x.CreatedAtUtc);
+
+            modelBuilder.Entity<LeaderboardCacheOutbox>()
+                .Property(x => x.ClientId)
+                .HasMaxLength(100)
+                .IsRequired();
+
+            modelBuilder.Entity<LeaderboardCacheOutbox>()
+                .HasOne<PuzzleAttempt>()
+                .WithMany()
+                .HasForeignKey(x => x.PuzzleAttemptId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            // -----------------------------------------
+            // LEADERBOARD OUTBOX DELIVERY
+            // -----------------------------------------
+
+            modelBuilder.Entity<LeaderboardCacheOutboxDelivery>()
+                .HasOne(x => x.Outbox)
+                .WithMany(x => x.Deliveries)
+                .HasForeignKey(x => x.OutboxId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            modelBuilder.Entity<LeaderboardCacheOutboxDelivery>()
                 .Property(x => x.Period)
                 .HasMaxLength(10)
                 .IsRequired();
 
-            // Dönem anahtarı zorunlu olsun.
-            modelBuilder.Entity<LeaderboardCacheOutbox>()
+            modelBuilder.Entity<LeaderboardCacheOutboxDelivery>()
                 .Property(x => x.PeriodKey)
                 .HasMaxLength(20)
                 .IsRequired();
 
-            // Ülke kodu en fazla 2 karakter olsun.
-            // NULL olması global leaderboard kaydını ifade eder.
-            modelBuilder.Entity<LeaderboardCacheOutbox>()
+            modelBuilder.Entity<LeaderboardCacheOutboxDelivery>()
                 .Property(x => x.CountryCode)
                 .HasMaxLength(2);
 
-            // Cache anahtarı zorunlu ve sınırlı uzunlukta olsun.
-            modelBuilder.Entity<LeaderboardCacheOutbox>()
+            modelBuilder.Entity<LeaderboardCacheOutboxDelivery>()
                 .Property(x => x.CacheKey)
                 .HasMaxLength(300)
                 .IsRequired();
 
-            // Kullanıcı kimliği zorunlu olsun.
-            modelBuilder.Entity<LeaderboardCacheOutbox>()
-                .Property(x => x.ClientId)
-                .HasMaxLength(100)
-                .IsRequired();
+            modelBuilder.Entity<LeaderboardCacheOutboxDelivery>()
+                .Property(x => x.LastError)
+                .HasMaxLength(2000);
 
-            // LeaderboardScore alanlarının uzunlukları.
+            modelBuilder.Entity<LeaderboardCacheOutboxDelivery>()
+                .Property(x => x.LockedBy)
+                .HasMaxLength(100);
+
+            modelBuilder.Entity<LeaderboardCacheOutboxDelivery>()
+                .HasIndex(x => new
+                {
+                    x.Status,
+                    x.NextRetryAtUtc,
+                    x.CreatedAtUtc
+                });
+
+            modelBuilder.Entity<LeaderboardCacheOutboxDelivery>()
+                .HasIndex(x => new
+                {
+                    x.OutboxId,
+                    x.Period,
+                    x.PeriodKey
+                })
+                .IsUnique()
+                .HasFilter("\"CountryCode\" IS NULL");
+
+            modelBuilder.Entity<LeaderboardCacheOutboxDelivery>()
+                .HasIndex(x => new
+                {
+                    x.OutboxId,
+                    x.Period,
+                    x.PeriodKey,
+                    x.CountryCode
+                })
+                .IsUnique()
+                .HasFilter("\"CountryCode\" IS NOT NULL");
+
+            // -----------------------------------------
+            // LEADERBOARD SCORE
+            // -----------------------------------------
+
             modelBuilder.Entity<LeaderboardScore>()
                 .Property(x => x.ClientId)
                 .HasMaxLength(100)
@@ -115,13 +168,22 @@ namespace DailyChessPuzzleApi.Data
                 .Property(x => x.CountryCode)
                 .HasMaxLength(2);
 
-            // Global leaderboard kayıtlarının benzersizliği.
+            // Yeni Revision alanının varsayılan değeri.
             modelBuilder.Entity<LeaderboardScore>()
-                .HasIndex(x => new { x.ClientId, x.Period, x.PeriodKey })
+                .Property(x => x.Revision)
+                .HasDefaultValue(0L)
+                .IsRequired();
+
+            modelBuilder.Entity<LeaderboardScore>()
+                .HasIndex(x => new
+                {
+                    x.ClientId,
+                    x.Period,
+                    x.PeriodKey
+                })
                 .IsUnique()
                 .HasFilter("\"CountryCode\" IS NULL");
 
-            // Ülke bazlı leaderboard kayıtlarının benzersizliği.
             modelBuilder.Entity<LeaderboardScore>()
                 .HasIndex(x => new
                 {
@@ -133,7 +195,6 @@ namespace DailyChessPuzzleApi.Data
                 .IsUnique()
                 .HasFilter("\"CountryCode\" IS NOT NULL");
 
-            // Dönem ve ülke filtreli leaderboard sıralamalarını hızlandırır.
             modelBuilder.Entity<LeaderboardScore>()
                 .HasIndex(x => new
                 {

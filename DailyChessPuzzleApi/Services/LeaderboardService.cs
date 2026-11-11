@@ -82,7 +82,6 @@ namespace DailyChessPuzzleApi.Services
                 ? null
                 : clientId.Trim();
 
-            // Günlük leaderboard.
             var daily = await GetFixedPeriodAsync(
                 "daily",
                 today.ToString("yyyy-MM-dd"),
@@ -93,7 +92,6 @@ namespace DailyChessPuzzleApi.Services
                 limit,
                 cancellationToken);
 
-            // Haftalık leaderboard: ISO pazartesi başlangıcı.
             int daysSinceMonday =
                 ((int)today.DayOfWeek + 6) % 7;
 
@@ -117,7 +115,6 @@ namespace DailyChessPuzzleApi.Services
                 limit,
                 cancellationToken);
 
-            // Aylık leaderboard.
             var monthlyStartDate = new DateOnly(
                 today.Year,
                 today.Month,
@@ -133,7 +130,6 @@ namespace DailyChessPuzzleApi.Services
                 limit,
                 cancellationToken);
 
-            // Tüm zamanlar leaderboard.
             var allTime = await GetFixedPeriodAsync(
                 "alltime",
                 "all",
@@ -144,7 +140,6 @@ namespace DailyChessPuzzleApi.Services
                 limit,
                 cancellationToken);
 
-            // İsteğe bağlı özel tarih aralığı.
             LeaderboardPeriodDto? customRange = null;
 
             if (startDate.HasValue && endDate.HasValue)
@@ -173,7 +168,6 @@ namespace DailyChessPuzzleApi.Services
             };
         }
 
-        // Günlük, haftalık, aylık ve tüm zamanlar leaderboard verisini getirir.
         private async Task<LeaderboardPeriodDto> GetFixedPeriodAsync(
             string period,
             string periodKey,
@@ -297,8 +291,6 @@ namespace DailyChessPuzzleApi.Services
             };
         }
 
-        // Özel tarih aralığını Redis üzerinden oluşturur.
-        // Eksik günlük cache kayıtlarını PostgreSQL'den tamamlar.
         private async Task<LeaderboardPeriodDto> GetCustomRangeAsync(
             DateOnly startDate,
             DateOnly endDate,
@@ -315,7 +307,6 @@ namespace DailyChessPuzzleApi.Services
                 var dailyKeys = new List<string>();
                 var versionKeys = new List<string>();
 
-                // Tarih aralığındaki bütün günlük Redis kayıtlarını hazırla.
                 for (var date = startDate;
                      date <= endDate;
                      date = date.AddDays(1))
@@ -336,7 +327,6 @@ namespace DailyChessPuzzleApi.Services
                     versionKeys.Add(versionKey);
                 }
 
-                // Günlük cache versiyonlarını oku.
                 var versions = new List<long>();
 
                 foreach (var versionKey in versionKeys)
@@ -345,7 +335,6 @@ namespace DailyChessPuzzleApi.Services
                         await _cacheService.GetVersionAsync(versionKey));
                 }
 
-                // Versiyonlardan fingerprint üret.
                 string versionData = string.Join(",", versions);
 
                 string versionFingerprint = Convert.ToHexString(
@@ -370,7 +359,6 @@ namespace DailyChessPuzzleApi.Services
                     rangeKey,
                     limit);
 
-                // Kullanıcının kendi sıralamasını getir.
                 if (clientId != null)
                 {
                     var userScore = await _cacheService.GetUserScoreAsync(
@@ -443,7 +431,6 @@ namespace DailyChessPuzzleApi.Services
             };
         }
 
-        // Günlük Redis cache hazır değilse PostgreSQL'den yükler.
         private async Task EnsureDailyCacheReadyAsync(
             string dailyKey,
             string versionKey,
@@ -469,7 +456,8 @@ namespace DailyChessPuzzleApi.Services
                 {
                     x.ClientId,
                     x.TotalScore,
-                    x.SolvedCount
+                    x.SolvedCount,
+                    x.Revision
                 })
                 .ToListAsync(cancellationToken);
 
@@ -477,14 +465,14 @@ namespace DailyChessPuzzleApi.Services
                 .Select(x => (
                     x.ClientId,
                     x.TotalScore,
-                    x.SolvedCount))
+                    x.SolvedCount,
+                    x.Revision))
                 .ToList();
 
             await _cacheService.RebuildDailyAsync(
                 dailyKey,
                 cacheEntries);
 
-            // Günlük cache oluşturulduğunda versiyonu artır.
             await _cacheService.IncrementVersionAsync(versionKey);
 
             _logger.LogInformation(
@@ -494,7 +482,6 @@ namespace DailyChessPuzzleApi.Services
                 cacheEntries.Count);
         }
 
-        // PostgreSQL üzerinden özel tarih aralığının ilk N kullanıcısını getirir.
         private async Task<List<(string ClientId, int TotalScore, int SolvedCount)>>
             GetCustomRangeTopFromDatabaseAsync(
                 DateOnly startDate,
@@ -536,8 +523,6 @@ namespace DailyChessPuzzleApi.Services
                 .ToList();
         }
 
-        // PostgreSQL üzerinden kullanıcının özel tarih aralığındaki
-        // puanını ve rekabetçi sıralamasını hesaplar.
         private async Task<LeaderboardEntryDto?> GetCustomRangeCurrentUserFromDatabaseAsync(
             DateOnly startDate,
             DateOnly endDate,
@@ -596,7 +581,6 @@ namespace DailyChessPuzzleApi.Services
             };
         }
 
-        // Redis'ten gelen kayıtları DTO'ya dönüştürür.
         private static List<LeaderboardEntryDto> CreateRankings(
             List<(string ClientId, int TotalScore, int SolvedCount)> entries)
         {
@@ -711,7 +695,8 @@ namespace DailyChessPuzzleApi.Services
                 {
                     x.ClientId,
                     x.TotalScore,
-                    x.SolvedCount
+                    x.SolvedCount,
+                    x.Revision
                 })
                 .ToListAsync(cancellationToken);
 
@@ -719,7 +704,8 @@ namespace DailyChessPuzzleApi.Services
                 .Select(x => (
                     x.ClientId,
                     x.TotalScore,
-                    x.SolvedCount))
+                    x.SolvedCount,
+                    x.Revision))
                 .ToList();
 
             await _cacheService.RebuildAsync(

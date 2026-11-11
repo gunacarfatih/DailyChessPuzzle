@@ -71,8 +71,8 @@ namespace DailyChessPuzzleApi.Services
         }
 
         // Bulmaca sonucunu hesaplar ve PostgreSQL'e kaydeder.
-        // Leaderboard güncelleme görevlerini de aynı transaction
-        // içerisinde Outbox tablosuna ekler.
+        // Leaderboard Outbox ve Delivery kayıtlarını da
+        // aynı transaction içerisinde oluşturur.
         public async Task<PuzzleSubmitResponse> SubmitAsync(
             PuzzleSubmitRequest request,
             CancellationToken cancellationToken = default)
@@ -145,8 +145,8 @@ namespace DailyChessPuzzleApi.Services
                 SubmittedAtUtc = DateTime.UtcNow
             };
 
-            // PuzzleAttempt ve Outbox kayıtlarının birlikte
-            // kaydedilmesini garanti etmek için transaction başlatılır.
+            // PuzzleAttempt, Outbox ve Delivery kayıtlarının
+            // birlikte kaydedilmesini garanti etmek için transaction.
             await using var transaction =
                 await _context.Database.BeginTransactionAsync(
                     cancellationToken
@@ -154,7 +154,7 @@ namespace DailyChessPuzzleApi.Services
 
             try
             {
-                // 1. Bulmaca denemesini PostgreSQL'e ekle.
+                // 1. Bulmaca denemesini PostgreSQL'e kaydet.
                 await _context.PuzzleAttempts.AddAsync(
                     attempt,
                     cancellationToken
@@ -162,18 +162,20 @@ namespace DailyChessPuzzleApi.Services
 
                 await _context.SaveChangesAsync(cancellationToken);
 
-                // 2. Dört leaderboard dönemi için görevleri oluştur.
+                // 2. Tek bir ana Outbox olayı ve
+                // bu olaya bağlı 4 veya 8 Delivery oluştur.
                 await CreateLeaderboardOutboxEntriesAsync(
+                    attempt.Id,
                     request.ClientId,
                     today,
                     countryCode,
                     cancellationToken
                 );
 
-                // 3. Outbox görevlerini PostgreSQL'e kaydet.
+                // 3. Outbox ve Delivery kayıtlarını kaydet.
                 await _context.SaveChangesAsync(cancellationToken);
 
-                // Her iki kayıt da başarılıysa transaction tamamlanır.
+                // 4. Bütün işlemler başarılıysa transaction tamamlanır.
                 await transaction.CommitAsync(cancellationToken);
             }
             catch (DbUpdateException ex) when (
@@ -199,7 +201,7 @@ namespace DailyChessPuzzleApi.Services
             }
 
             _logger.LogInformation(
-                "Puzzle submission and leaderboard outbox tasks saved successfully. PuzzleId: {PuzzleId}, Score: {Score}",
+                "Puzzle submission and leaderboard outbox event saved successfully. PuzzleId: {PuzzleId}, Score: {Score}",
                 puzzle.Id,
                 score
             );
@@ -214,14 +216,29 @@ namespace DailyChessPuzzleApi.Services
             };
         }
 
-        // Günlük, haftalık, aylık ve tüm zamanlar leaderboard
-        // görevlerini oluşturur.
+        // Tek bir ana Outbox olayı oluşturur.
+        // Ardından günlük, haftalık, aylık ve tüm zamanlar
+        // için gerekli Delivery kayıtlarını oluşturur.
         private async Task CreateLeaderboardOutboxEntriesAsync(
+            int puzzleAttemptId,
             string clientId,
             DateOnly today,
             string? countryCode,
             CancellationToken cancellationToken)
         {
+            // Tek bir bulmaca çözümü için tek ana Outbox olayı.
+            var outboxEntry = new LeaderboardCacheOutbox
+            {
+                PuzzleAttemptId = puzzleAttemptId,
+                ClientId = clientId,
+                CreatedAtUtc = DateTime.UtcNow
+            };
+
+            await _context.LeaderboardCacheOutbox.AddAsync(
+                outboxEntry,
+                cancellationToken
+            );
+
             // Günlük dönem.
             var dailyPeriod = (
                 Period: "daily",
@@ -263,7 +280,6 @@ namespace DailyChessPuzzleApi.Services
             );
 
             // Tüm zamanlar dönemi.
-            // Başlangıç tarihi DateOnly.MinValue olarak belirlenir.
             var allTimePeriod = (
                 Period: "alltime",
                 PeriodKey: "all",
@@ -280,8 +296,9 @@ namespace DailyChessPuzzleApi.Services
 
             foreach (var period in periods)
             {
-                // Global leaderboard görevi.
-                await CreateLeaderboardOutboxEntryAsync(
+                // Global leaderboard Delivery kaydı.
+                await CreateLeaderboardOutboxDeliveryAsync(
+                    outboxEntry,
                     period.Period,
                     period.PeriodKey,
                     period.StartDate,
@@ -291,10 +308,12 @@ namespace DailyChessPuzzleApi.Services
                     cancellationToken
                 );
 
-                // Kullanıcının ülke bilgisi varsa ülke bazlı görev.
+                // Kullanıcının ülke bilgisi varsa
+                // ülke bazlı leaderboard Delivery kaydı.
                 if (countryCode != null)
                 {
-                    await CreateLeaderboardOutboxEntryAsync(
+                    await CreateLeaderboardOutboxDeliveryAsync(
+                        outboxEntry,
                         period.Period,
                         period.PeriodKey,
                         period.StartDate,
@@ -305,11 +324,18 @@ namespace DailyChessPuzzleApi.Services
                     );
                 }
             }
+
+            _logger.LogInformation(
+                "Leaderboard outbox event created. OutboxId: {OutboxId}, PuzzleAttemptId: {PuzzleAttemptId}, ClientId: {ClientId}",
+                outboxEntry.Id,
+                puzzleAttemptId,
+                clientId
+            );
         }
 
-        // Kullanıcının ilgili dönemdeki toplam puanını hesaplar
-        // ve PostgreSQL Outbox tablosuna ekler.
-        private async Task CreateLeaderboardOutboxEntryAsync(
+        // Belirli bir Redis hedefi için Delivery kaydı oluşturur.
+        private async Task CreateLeaderboardOutboxDeliveryAsync(
+            LeaderboardCacheOutbox outboxEntry,
             string period,
             string periodKey,
             DateOnly startDate,
@@ -328,7 +354,7 @@ namespace DailyChessPuzzleApi.Services
                 );
 
             // Ülke bazlı leaderboard isteniyorsa ülkeye göre filtrele.
-            // CountryCode null ise tüm ülkelerdeki denemeler hesaba katılır.
+            // CountryCode NULL ise bütün ülkelerdeki denemeler hesaba katılır.
             if (countryCode != null)
             {
                 query = query.Where(
@@ -351,34 +377,35 @@ namespace DailyChessPuzzleApi.Services
                 return;
             }
 
-            // Redis anahtar formatı.
+            // Redis anahtarı.
             // Örnek:
-            // DailyChessPuzzle_leaderboard:daily:2026-11-09:global
+            // DailyChessPuzzle_leaderboard:daily:2026-11-10:global
             // DailyChessPuzzle_leaderboard:alltime:all:global
             string cacheKey =
                 $"DailyChessPuzzle_leaderboard:{period}:{periodKey}:{countryCode ?? "global"}";
 
-            // PostgreSQL Outbox tablosuna güncelleme görevi ekle.
-            var outboxEntry = new LeaderboardCacheOutbox
+            // Ana Outbox olayına bağlı Delivery oluştur.
+            var delivery = new LeaderboardCacheOutboxDelivery
             {
-                CacheKey = cacheKey,
-                ClientId = clientId,
+                Outbox = outboxEntry,
                 Period = period,
                 PeriodKey = periodKey,
                 CountryCode = countryCode,
+                CacheKey = cacheKey,
                 TotalScore = aggregate.TotalScore,
                 SolvedCount = aggregate.SolvedCount,
-                IsProcessed = false,
+                Status = LeaderboardCacheOutboxDeliveryStatus.Pending,
+                RetryCount = 0,
                 CreatedAtUtc = DateTime.UtcNow
             };
 
-            await _context.LeaderboardCacheOutbox.AddAsync(
-                outboxEntry,
+            await _context.LeaderboardCacheOutboxDeliveries.AddAsync(
+                delivery,
                 cancellationToken
             );
 
             _logger.LogInformation(
-                "Leaderboard outbox task created. Period: {Period}, PeriodKey: {PeriodKey}, ClientId: {ClientId}, Country: {Country}",
+                "Leaderboard delivery created. Period: {Period}, PeriodKey: {PeriodKey}, ClientId: {ClientId}, Country: {Country}",
                 period,
                 periodKey,
                 clientId,
@@ -389,7 +416,7 @@ namespace DailyChessPuzzleApi.Services
         // Rating değerinden zorluk seviyesini belirler.
         private static string GetDifficulty(int rating)
         {
-            if (rating <= 1400)
+            if (rating <= 1000)
                 return "Kolay";
 
             if (rating <= 2000)

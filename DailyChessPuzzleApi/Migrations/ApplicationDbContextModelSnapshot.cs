@@ -54,15 +54,39 @@ namespace DailyChessPuzzleApi.Migrations
 
                     NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
 
-                    b.Property<string>("CacheKey")
-                        .IsRequired()
-                        .HasMaxLength(300)
-                        .HasColumnType("character varying(300)");
-
                     b.Property<string>("ClientId")
                         .IsRequired()
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("PuzzleAttemptId")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CreatedAtUtc");
+
+                    b.HasIndex("PuzzleAttemptId")
+                        .IsUnique();
+
+                    b.ToTable("LeaderboardCacheOutbox");
+                });
+
+            modelBuilder.Entity("DailyChessPuzzleApi.Models.LeaderboardCacheOutboxDelivery", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("CacheKey")
+                        .IsRequired()
+                        .HasMaxLength(300)
+                        .HasColumnType("character varying(300)");
 
                     b.Property<string>("CountryCode")
                         .HasMaxLength(2)
@@ -71,8 +95,22 @@ namespace DailyChessPuzzleApi.Migrations
                     b.Property<DateTime>("CreatedAtUtc")
                         .HasColumnType("timestamp with time zone");
 
-                    b.Property<bool>("IsProcessed")
-                        .HasColumnType("boolean");
+                    b.Property<string>("LastError")
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)");
+
+                    b.Property<string>("LockedBy")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<DateTime?>("LockedUntilUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime?>("NextRetryAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("OutboxId")
+                        .HasColumnType("integer");
 
                     b.Property<string>("Period")
                         .IsRequired()
@@ -87,7 +125,13 @@ namespace DailyChessPuzzleApi.Migrations
                     b.Property<DateTime?>("ProcessedAtUtc")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<int>("RetryCount")
+                        .HasColumnType("integer");
+
                     b.Property<int>("SolvedCount")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Status")
                         .HasColumnType("integer");
 
                     b.Property<int>("TotalScore")
@@ -95,9 +139,17 @@ namespace DailyChessPuzzleApi.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("IsProcessed", "CreatedAtUtc");
+                    b.HasIndex("OutboxId", "Period", "PeriodKey")
+                        .IsUnique()
+                        .HasFilter("\"CountryCode\" IS NULL");
 
-                    b.ToTable("LeaderboardCacheOutbox");
+                    b.HasIndex("Status", "NextRetryAtUtc", "CreatedAtUtc");
+
+                    b.HasIndex("OutboxId", "Period", "PeriodKey", "CountryCode")
+                        .IsUnique()
+                        .HasFilter("\"CountryCode\" IS NOT NULL");
+
+                    b.ToTable("LeaderboardCacheOutboxDeliveries");
                 });
 
             modelBuilder.Entity("DailyChessPuzzleApi.Models.LeaderboardScore", b =>
@@ -126,6 +178,11 @@ namespace DailyChessPuzzleApi.Migrations
                         .IsRequired()
                         .HasMaxLength(20)
                         .HasColumnType("character varying(20)");
+
+                    b.Property<long>("Revision")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasDefaultValue(0L);
 
                     b.Property<int>("SolvedCount")
                         .HasColumnType("integer");
@@ -253,6 +310,26 @@ namespace DailyChessPuzzleApi.Migrations
                     b.Navigation("Puzzle");
                 });
 
+            modelBuilder.Entity("DailyChessPuzzleApi.Models.LeaderboardCacheOutbox", b =>
+                {
+                    b.HasOne("DailyChessPuzzleApi.Models.PuzzleAttempt", null)
+                        .WithMany()
+                        .HasForeignKey("PuzzleAttemptId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("DailyChessPuzzleApi.Models.LeaderboardCacheOutboxDelivery", b =>
+                {
+                    b.HasOne("DailyChessPuzzleApi.Models.LeaderboardCacheOutbox", "Outbox")
+                        .WithMany("Deliveries")
+                        .HasForeignKey("OutboxId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Outbox");
+                });
+
             modelBuilder.Entity("DailyChessPuzzleApi.Models.PuzzleAttempt", b =>
                 {
                     b.HasOne("DailyChessPuzzleApi.Models.Puzzle", "Puzzle")
@@ -262,6 +339,11 @@ namespace DailyChessPuzzleApi.Migrations
                         .IsRequired();
 
                     b.Navigation("Puzzle");
+                });
+
+            modelBuilder.Entity("DailyChessPuzzleApi.Models.LeaderboardCacheOutbox", b =>
+                {
+                    b.Navigation("Deliveries");
                 });
 
             modelBuilder.Entity("DailyChessPuzzleApi.Models.Puzzle", b =>
